@@ -1,6 +1,6 @@
-/* This Source Code Form is subject to the terms of the Mozilla Public
- * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 use dom::bindings::codegen::Bindings::RequestBinding::RequestInit;
 use dom::bindings::codegen::Bindings::ResponseBinding::ResponseBinding::ResponseMethods;
@@ -78,7 +78,7 @@ pub fn Fetch(global: &GlobalScope, input: RequestOrUSVString, init: &RequestInit
         Err(e) => {
             promise.reject_error(promise.global().get_cx(), e);
             return promise;
-        },
+        }
         Ok(r) => r.get_request(),
     };
     let request_init = request_init_from_request(request);
@@ -99,9 +99,10 @@ pub fn Fetch(global: &GlobalScope, input: RequestOrUSVString, init: &RequestInit
         wrapper: None,
     };
 
-    ROUTER.add_route(action_receiver.to_opaque(), box move |message| {
-        listener.notify_fetch(message.to().unwrap());
-    });
+    ROUTER.add_route(action_receiver.to_opaque(),
+                     box move |message| {
+                         listener.notify_fetch(message.to().unwrap());
+                     });
     core_resource_thread.send(NetTraitsFetch(request_init, action_sender)).unwrap();
 
     promise
@@ -129,30 +130,32 @@ impl FetchResponseListener for FetchContext {
         match fetch_metadata {
             // Step 4.1
             Err(_) => {
-                promise.reject_error(
-                    promise.global().get_cx(),
-                    Error::Type("Network error occurred".to_string()));
+                promise.reject_error(promise.global().get_cx(),
+                                     Error::Type("Network error occurred".to_string()));
                 self.fetch_promise = Some(TrustedPromise::new(promise));
                 return;
-            },
+            }
             // Step 4.2
             Ok(metadata) => {
                 match metadata {
-                    FetchMetadata::Unfiltered(m) =>
-                        fill_headers_with_metadata(self.response_object.root(), m),
-                    FetchMetadata::Filtered { filtered, .. } => match filtered {
-                        FilteredMetadata::Transparent(m) =>
-                            fill_headers_with_metadata(self.response_object.root(), m),
-                        FilteredMetadata::Opaque =>
-                            self.response_object.root().set_type(DOMResponseType::Opaque),
+                    FetchMetadata::Unfiltered(m) => {
+                        fill_headers_with_metadata(self.response_object.root(), m)
+                    }
+                    FetchMetadata::Filtered { filtered, .. } => {
+                        match filtered {
+                            FilteredMetadata::Transparent(m) => {
+                                fill_headers_with_metadata(self.response_object.root(), m)
+                            }
+                            FilteredMetadata::Opaque => {
+                                self.response_object.root().set_type(DOMResponseType::Opaque)
+                            }
+                        }
                     }
                 }
             }
         }
         // Step 4.3
-        promise.resolve_native(
-            promise_cx,
-            &self.response_object.root());
+        promise.resolve_native(promise_cx, &self.response_object.root());
         self.fetch_promise = Some(TrustedPromise::new(promise));
     }
 

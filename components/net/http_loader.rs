@@ -467,6 +467,8 @@ pub fn determine_request_referrer(headers: &mut Headers,
             Some(ReferrerPolicy::SameOrigin) => if cross_origin { None } else { strip_url(ref_url, false) },
             Some(ReferrerPolicy::UnsafeUrl) => strip_url(ref_url, false),
             Some(ReferrerPolicy::OriginWhenCrossOrigin) => strip_url(ref_url, cross_origin),
+            Some(ReferrerPolicy::StrictOrigin) => strip_url(ref_url, true),
+            Some(ReferrerPolicy::StrictOriginWhenCrossOrigin) => strip_url(ref_url, true),
             Some(ReferrerPolicy::NoReferrerWhenDowngrade) | None =>
                 no_referrer_when_downgrade_header(ref_url, url),
         };

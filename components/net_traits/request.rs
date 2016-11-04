@@ -1,6 +1,6 @@
-/* This Source Code Form is subject to the terms of the Mozilla Public
- * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 use hyper::header::Headers;
 use hyper::method::Method;
@@ -17,29 +17,47 @@ pub enum Initiator {
     Download,
     ImageSet,
     Manifest,
-    XSLT
+    XSLT,
 }
 
 /// A request [type](https://fetch.spec.whatwg.org/#concept-request-type)
 #[derive(Copy, Clone, PartialEq, Serialize, Deserialize, HeapSizeOf)]
 pub enum Type {
-    None, Audio, Font, Image,
-    Script, Style, Track, Video
+    None,
+    Audio,
+    Font,
+    Image,
+    Script,
+    Style,
+    Track,
+    Video,
 }
 
 /// A request [destination](https://fetch.spec.whatwg.org/#concept-request-destination)
 #[derive(Copy, Clone, PartialEq, Serialize, Deserialize, HeapSizeOf)]
 pub enum Destination {
-    None, Document, Embed, Font, Image, Manifest,
-    Media, Object, Report, Script, ServiceWorker,
-    SharedWorker, Style, Worker, XSLT
+    None,
+    Document,
+    Embed,
+    Font,
+    Image,
+    Manifest,
+    Media,
+    Object,
+    Report,
+    Script,
+    ServiceWorker,
+    SharedWorker,
+    Style,
+    Worker,
+    XSLT,
 }
 
 /// A request [origin](https://fetch.spec.whatwg.org/#concept-request-origin)
 #[derive(Clone, PartialEq, Debug, HeapSizeOf)]
 pub enum Origin {
     Client,
-    Origin(UrlOrigin)
+    Origin(UrlOrigin),
 }
 
 /// A [referer](https://fetch.spec.whatwg.org/#concept-request-referrer)
@@ -48,7 +66,7 @@ pub enum Referrer {
     NoReferrer,
     /// Default referrer if nothing is specified
     Client,
-    ReferrerUrl(Url)
+    ReferrerUrl(Url),
 }
 
 /// A [request mode](https://fetch.spec.whatwg.org/#concept-request-mode)
@@ -57,7 +75,7 @@ pub enum RequestMode {
     Navigate,
     SameOrigin,
     NoCORS,
-    CORSMode
+    CORSMode,
 }
 
 /// Request [credentials mode](https://fetch.spec.whatwg.org/#concept-request-credentials-mode)
@@ -65,7 +83,7 @@ pub enum RequestMode {
 pub enum CredentialsMode {
     Omit,
     CredentialsSameOrigin,
-    Include
+    Include,
 }
 
 /// [Cache mode](https://fetch.spec.whatwg.org/#concept-request-cache-mode)
@@ -76,7 +94,7 @@ pub enum CacheMode {
     Reload,
     NoCache,
     ForceCache,
-    OnlyIfCached
+    OnlyIfCached,
 }
 
 /// [Redirect mode](https://fetch.spec.whatwg.org/#concept-request-redirect-mode)
@@ -84,7 +102,7 @@ pub enum CacheMode {
 pub enum RedirectMode {
     Follow,
     Error,
-    Manual
+    Manual,
 }
 
 /// [Response tainting](https://fetch.spec.whatwg.org/#concept-request-response-tainting)
@@ -92,22 +110,21 @@ pub enum RedirectMode {
 pub enum ResponseTainting {
     Basic,
     CORSTainting,
-    Opaque
+    Opaque,
 }
 
 /// [Window](https://fetch.spec.whatwg.org/#concept-request-window)
 #[derive(Copy, Clone, PartialEq, HeapSizeOf)]
 pub enum Window {
     NoWindow,
-    Client,
-    // TODO: Environmental settings object
+    Client, // TODO: Environmental settings object
 }
 
 /// [CORS settings attribute](https://html.spec.whatwg.org/multipage/#attr-crossorigin-anonymous)
 #[derive(Copy, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CORSSettings {
     Anonymous,
-    UseCredentials
+    UseCredentials,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -208,7 +225,8 @@ impl Request {
     pub fn new(url: Url,
                origin: Option<Origin>,
                is_service_worker_global_scope: bool,
-               pipeline_id: Option<PipelineId>) -> Request {
+               pipeline_id: Option<PipelineId>)
+               -> Request {
         Request {
             method: RefCell::new(Method::Get),
             local_urls_only: false,
@@ -239,14 +257,15 @@ impl Request {
             url_list: RefCell::new(vec![url]),
             redirect_count: Cell::new(0),
             response_tainting: Cell::new(ResponseTainting::Basic),
-            done: Cell::new(false)
+            done: Cell::new(false),
         }
     }
 
     pub fn from_init(init: RequestInit) -> Request {
         let mut req = Request::new(init.url,
                                    Some(Origin::Origin(init.origin.origin())),
-                                   false, init.pipeline_id);
+                                   false,
+                                   init.pipeline_id);
         *req.method.borrow_mut() = init.method;
         *req.headers.borrow_mut() = init.headers;
         req.unsafe_request = init.unsafe_request;
@@ -282,11 +301,10 @@ impl Request {
 
     pub fn is_subresource_request(&self) -> bool {
         match self.destination {
-            Destination::Font | Destination::Image | Destination::Manifest
-                | Destination::Media | Destination::Script
-                | Destination::Style | Destination::XSLT
-                | Destination::None => true,
-            _ => false
+            Destination::Font | Destination::Image | Destination::Manifest |
+            Destination::Media | Destination::Script | Destination::Style | Destination::XSLT |
+            Destination::None => true,
+            _ => false,
         }
     }
 }
@@ -295,7 +313,7 @@ impl Referrer {
     pub fn to_url(&self) -> Option<&Url> {
         match *self {
             Referrer::NoReferrer | Referrer::Client => None,
-            Referrer::ReferrerUrl(ref url) => Some(url)
+            Referrer::ReferrerUrl(ref url) => Some(url),
         }
     }
     pub fn from_url(url: Option<Url>) -> Self {
@@ -310,7 +328,7 @@ impl Referrer {
         swap(self, &mut new);
         match new {
             Referrer::NoReferrer | Referrer::Client => None,
-            Referrer::ReferrerUrl(url) => Some(url)
+            Referrer::ReferrerUrl(url) => Some(url),
         }
     }
 }

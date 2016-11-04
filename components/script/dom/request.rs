@@ -1,6 +1,6 @@
-/* This Source Code Form is subject to the terms of the Mozilla Public
- * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 use body::{BodyOperations, BodyType, consume_body};
 use dom::bindings::cell::DOMRefCell;
@@ -54,13 +54,13 @@ pub struct Request {
 impl Request {
     fn new_inherited(global: &GlobalScope,
                      url: Url,
-                     is_service_worker_global_scope: bool) -> Request {
+                     is_service_worker_global_scope: bool)
+                     -> Request {
         Request {
             reflector_: Reflector::new(),
-            request: DOMRefCell::new(
-                net_request_from_global(global,
-                                        url,
-                                        is_service_worker_global_scope)),
+            request: DOMRefCell::new(net_request_from_global(global,
+                                                             url,
+                                                             is_service_worker_global_scope)),
             body_used: Cell::new(false),
             headers: Default::default(),
             mime_type: DOMRefCell::new("".to_string().into_bytes()),
@@ -70,11 +70,11 @@ impl Request {
 
     pub fn new(global: &GlobalScope,
                url: Url,
-               is_service_worker_global_scope: bool) -> Root<Request> {
-        reflect_dom_object(box Request::new_inherited(global,
-                                                      url,
-                                                      is_service_worker_global_scope),
-                           global, RequestBinding::Wrap)
+               is_service_worker_global_scope: bool)
+               -> Root<Request> {
+        reflect_dom_object(box Request::new_inherited(global, url, is_service_worker_global_scope),
+                           global,
+                           RequestBinding::Wrap)
     }
 
     // https://fetch.spec.whatwg.org/#dom-request
@@ -102,17 +102,15 @@ impl Request {
                 let parsed_url = base_url.join(&usv_string);
                 // Step 5.2
                 if parsed_url.is_err() {
-                    return Err(Error::Type("Url could not be parsed".to_string()))
+                    return Err(Error::Type("Url could not be parsed".to_string()));
                 }
                 // Step 5.3
                 let url = parsed_url.unwrap();
                 if includes_credentials(&url) {
-                    return Err(Error::Type("Url includes credentials".to_string()))
+                    return Err(Error::Type("Url includes credentials".to_string()));
                 }
                 // Step 5.4
-                temporary_request = net_request_from_global(global,
-                                                            url,
-                                                            false);
+                temporary_request = net_request_from_global(global, url, false);
                 // Step 5.5
                 fallback_mode = Some(NetTraitsRequestMode::CORSMode);
                 // Step 5.6
@@ -122,7 +120,7 @@ impl Request {
             RequestInfo::Request(ref input_request) => {
                 // Step 6.1
                 if request_is_disturbed(input_request) || request_is_locked(input_request) {
-                    return Err(Error::Type("Input is disturbed or locked".to_string()))
+                    return Err(Error::Type("Input is disturbed or locked".to_string()));
                 }
                 // Step 6.2
                 temporary_request = input_request.request.borrow().clone();
@@ -141,7 +139,7 @@ impl Request {
 
         // Step 10
         if !init.window.is_undefined() && !init.window.is_null() {
-            return Err(Error::Type("Window is present and is not null".to_string()))
+            return Err(Error::Type("Window is present and is not null".to_string()));
         }
 
         // Step 11
@@ -151,9 +149,7 @@ impl Request {
 
         // Step 12
         let mut request: NetTraitsRequest;
-        request = net_request_from_global(global,
-                                          temporary_request.current_url(),
-                                          false);
+        request = net_request_from_global(global, temporary_request.current_url(), false);
         request.method = temporary_request.method;
         request.headers = temporary_request.headers.clone();
         request.unsafe_request = true;
@@ -170,29 +166,24 @@ impl Request {
         request.integrity_metadata = temporary_request.integrity_metadata;
 
         // Step 13
-        if init.body.is_some() ||
-            init.cache.is_some() ||
-            init.credentials.is_some() ||
-            init.integrity.is_some() ||
-            init.headers.is_some() ||
-            init.method.is_some() ||
-            init.mode.is_some() ||
-            init.redirect.is_some() ||
-            init.referrer.is_some() ||
-            init.referrerPolicy.is_some() ||
-            !init.window.is_undefined() {
-                // Step 13.1
-                if request.mode == NetTraitsRequestMode::Navigate {
-                    return Err(Error::Type(
-                        "Init is present and request mode is 'navigate'".to_string()));
-                    }
-                // Step 13.2
-                request.omit_origin_header.set(false);
-                // Step 13.3
-                *request.referrer.borrow_mut() = NetTraitsRequestReferrer::Client;
-                // Step 13.4
-                request.referrer_policy.set(None);
+        if init.body.is_some() || init.cache.is_some() || init.credentials.is_some() ||
+           init.integrity.is_some() || init.headers.is_some() ||
+           init.method.is_some() || init.mode.is_some() ||
+           init.redirect.is_some() ||
+           init.referrer.is_some() || init.referrerPolicy.is_some() ||
+           !init.window.is_undefined() {
+            // Step 13.1
+            if request.mode == NetTraitsRequestMode::Navigate {
+                return Err(Error::Type("Init is present and request mode is 'navigate'"
+                    .to_string()));
             }
+            // Step 13.2
+            request.omit_origin_header.set(false);
+            // Step 13.3
+            *request.referrer.borrow_mut() = NetTraitsRequestReferrer::Client;
+            // Step 13.4
+            request.referrer_policy.set(None);
+        }
 
         // Step 14
         if let Some(init_referrer) = init.referrer.as_ref() {
@@ -206,24 +197,23 @@ impl Request {
                 let parsed_referrer = base_url.join(referrer);
                 // Step 14.4
                 if parsed_referrer.is_err() {
-                    return Err(Error::Type(
-                        "Failed to parse referrer url".to_string()));
+                    return Err(Error::Type("Failed to parse referrer url".to_string()));
                 }
                 // Step 14.5
                 if let Ok(parsed_referrer) = parsed_referrer {
-                    if parsed_referrer.cannot_be_a_base() &&
-                        parsed_referrer.scheme() == "about" &&
-                        parsed_referrer.path() == "client" {
-                            *request.referrer.borrow_mut() = NetTraitsRequestReferrer::Client;
-                        } else {
-                            // Step 14.6
-                            if parsed_referrer.origin() != origin {
-                                return Err(Error::Type(
-                                    "RequestInit's referrer has invalid origin".to_string()));
-                            }
-                            // Step 14.7
-                            *request.referrer.borrow_mut() = NetTraitsRequestReferrer::ReferrerUrl(parsed_referrer);
+                    if parsed_referrer.cannot_be_a_base() && parsed_referrer.scheme() == "about" &&
+                       parsed_referrer.path() == "client" {
+                        *request.referrer.borrow_mut() = NetTraitsRequestReferrer::Client;
+                    } else {
+                        // Step 14.6
+                        if parsed_referrer.origin() != origin {
+                            return Err(Error::Type("RequestInit's referrer has invalid origin"
+                                .to_string()));
                         }
+                        // Step 14.7
+                        *request.referrer.borrow_mut() =
+                            NetTraitsRequestReferrer::ReferrerUrl(parsed_referrer);
+                    }
                 }
             }
         }
@@ -248,7 +238,8 @@ impl Request {
         }
 
         // Step 19
-        let credentials = init.credentials.as_ref().map(|m| m.clone().into()).or(fallback_credentials);
+        let credentials =
+            init.credentials.as_ref().map(|m| m.clone().into()).or(fallback_credentials);
 
         // Step 20
         if let Some(c) = credentials {
@@ -264,8 +255,8 @@ impl Request {
         // Step 22
         if request.cache_mode.get() == NetTraitsRequestCache::OnlyIfCached {
             if request.mode != NetTraitsRequestMode::SameOrigin {
-                return Err(Error::Type(
-                    "Cache is 'only-if-cached' and mode is not 'same-origin'".to_string()));
+                return Err(Error::Type("Cache is 'only-if-cached' and mode is not 'same-origin'"
+                    .to_string()));
             }
         }
 
@@ -300,9 +291,7 @@ impl Request {
         }
 
         // Step 26
-        let r = Request::from_net_request(global,
-                                          false,
-                                          request);
+        let r = Request::from_net_request(global, false, request);
         r.headers.or_init(|| Headers::for_request(&r.global()));
 
         // Step 27
@@ -329,8 +318,9 @@ impl Request {
             let borrowed_request = r.request.borrow();
             // Step 30.1
             if !is_cors_safelisted_method(&borrowed_request.method.borrow()) {
-                return Err(Error::Type(
-                    "The mode is 'no-cors' but the method is not a cors-safelisted method".to_string()));
+                return Err(Error::Type("The mode is 'no-cors' but the method is not a \
+                                        cors-safelisted method"
+                    .to_string()));
             }
             // Step 30.2
             if !borrowed_request.integrity_metadata.borrow().is_empty() {
@@ -358,11 +348,17 @@ impl Request {
                 let req = r.request.borrow();
                 let req_method = req.method.borrow();
                 match &*req_method {
-                    &HttpMethod::Get => return Err(Error::Type(
-                        "Init's body is non-null, and request method is GET".to_string())),
-                    &HttpMethod::Head => return Err(Error::Type(
-                        "Init's body is non-null, and request method is HEAD".to_string())),
-                    _ => {},
+                    &HttpMethod::Get => {
+                        return Err(Error::Type("Init's body is non-null, and request method is \
+                                                GET"
+                            .to_string()))
+                    }
+                    &HttpMethod::Head => {
+                        return Err(Error::Type("Init's body is non-null, and request method is \
+                                                HEAD"
+                            .to_string()))
+                    }
+                    _ => {}
                 }
             }
         }
@@ -412,7 +408,8 @@ impl Request {
 impl Request {
     fn from_net_request(global: &GlobalScope,
                         is_service_worker_global_scope: bool,
-                        net_request: NetTraitsRequest) -> Root<Request> {
+                        net_request: NetTraitsRequest)
+                        -> Root<Request> {
         let r = Request::new(global,
                              net_request.current_url(),
                              is_service_worker_global_scope);
@@ -448,7 +445,8 @@ impl Request {
 
 fn net_request_from_global(global: &GlobalScope,
                            url: Url,
-                           is_service_worker_global_scope: bool) -> NetTraitsRequest {
+                           is_service_worker_global_scope: bool)
+                           -> NetTraitsRequest {
     let origin = Origin::Origin(global.get_url().origin());
     let pipeline_id = global.pipeline_id();
     NetTraitsRequest::new(url,
@@ -497,9 +495,7 @@ fn is_forbidden_method(m: &ByteString) -> bool {
 
 // https://fetch.spec.whatwg.org/#cors-safelisted-method
 fn is_cors_safelisted_method(m: &HttpMethod) -> bool {
-    m == &HttpMethod::Get ||
-        m == &HttpMethod::Head ||
-        m == &HttpMethod::Post
+    m == &HttpMethod::Get || m == &HttpMethod::Head || m == &HttpMethod::Post
 }
 
 // https://url.spec.whatwg.org/#include-credentials
@@ -565,7 +561,12 @@ impl RequestMethods for Request {
 
     // https://fetch.spec.whatwg.org/#dom-request-referrerpolicy
     fn ReferrerPolicy(&self) -> ReferrerPolicy {
-        self.request.borrow().referrer_policy.get().map(|m| m.into()).unwrap_or(ReferrerPolicy::_empty)
+        self.request
+            .borrow()
+            .referrer_policy
+            .get()
+            .map(|m| m.into())
+            .unwrap_or(ReferrerPolicy::_empty)
     }
 
     // https://fetch.spec.whatwg.org/#dom-request-mode
@@ -817,11 +818,16 @@ impl Into<MsgReferrerPolicy> for ReferrerPolicy {
         match self {
             ReferrerPolicy::_empty => MsgReferrerPolicy::NoReferrer,
             ReferrerPolicy::No_referrer => MsgReferrerPolicy::NoReferrer,
-            ReferrerPolicy::No_referrer_when_downgrade =>
-                MsgReferrerPolicy::NoReferrerWhenDowngrade,
+            ReferrerPolicy::No_referrer_when_downgrade => {
+                MsgReferrerPolicy::NoReferrerWhenDowngrade
+            }
             ReferrerPolicy::Origin => MsgReferrerPolicy::Origin,
             ReferrerPolicy::Origin_when_cross_origin => MsgReferrerPolicy::OriginWhenCrossOrigin,
             ReferrerPolicy::Unsafe_url => MsgReferrerPolicy::UnsafeUrl,
+            ReferrerPolicy::Strict_origin => MsgReferrerPolicy::StrictOrigin,
+            ReferrerPolicy::Strict_origin_when_cross_origin => {
+                MsgReferrerPolicy::StrictOriginWhenCrossOrigin
+            }
         }
     }
 }
@@ -830,12 +836,17 @@ impl Into<ReferrerPolicy> for MsgReferrerPolicy {
     fn into(self) -> ReferrerPolicy {
         match self {
             MsgReferrerPolicy::NoReferrer => ReferrerPolicy::No_referrer,
-            MsgReferrerPolicy::NoReferrerWhenDowngrade =>
-                ReferrerPolicy::No_referrer_when_downgrade,
+            MsgReferrerPolicy::NoReferrerWhenDowngrade => {
+                ReferrerPolicy::No_referrer_when_downgrade
+            }
             MsgReferrerPolicy::Origin => ReferrerPolicy::Origin,
             MsgReferrerPolicy::SameOrigin => ReferrerPolicy::Origin,
             MsgReferrerPolicy::OriginWhenCrossOrigin => ReferrerPolicy::Origin_when_cross_origin,
             MsgReferrerPolicy::UnsafeUrl => ReferrerPolicy::Unsafe_url,
+            MsgReferrerPolicy::StrictOrigin => ReferrerPolicy::Strict_origin,
+            MsgReferrerPolicy::StrictOriginWhenCrossOrigin => {
+                ReferrerPolicy::Strict_origin_when_cross_origin
+            }
         }
     }
 }
@@ -862,13 +873,12 @@ impl Into<RequestRedirect> for NetTraitsRequestRedirect {
 
 impl Clone for HeadersInit {
     fn clone(&self) -> HeadersInit {
-    match self {
-        &HeadersInit::Headers(ref h) =>
-            HeadersInit::Headers(h.clone()),
-        &HeadersInit::ByteStringSequenceSequence(ref b) =>
-            HeadersInit::ByteStringSequenceSequence(b.clone()),
-        &HeadersInit::ByteStringMozMap(ref m) =>
-            HeadersInit::ByteStringMozMap(m.clone()),
+        match self {
+            &HeadersInit::Headers(ref h) => HeadersInit::Headers(h.clone()),
+            &HeadersInit::ByteStringSequenceSequence(ref b) => {
+                HeadersInit::ByteStringSequenceSequence(b.clone())
+            }
+            &HeadersInit::ByteStringMozMap(ref m) => HeadersInit::ByteStringMozMap(m.clone()),
         }
     }
 }
