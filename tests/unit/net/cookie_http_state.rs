@@ -49,6 +49,7 @@ fn test_0002() {
     let r = run("http://home.example.org:8888/cookie-parser?0002",
                 &["foo=bar; Expires=Fri, 07 Aug 2019 08:04:19 GMT"],
                 "http://home.example.org:8888/cookie-parser-result?0002");
+    println!("{:?}", &r);
     assert_eq!(&r, "foo=bar");
 }
 
@@ -67,6 +68,7 @@ fn test_0004() {
     let r = run("http://home.example.org:8888/cookie-parser?0004",
                 &["foo"],
                 "http://home.example.org:8888/cookie-parser-result?0004");
+    println!("{:?}", &r);
     assert_eq!(&r, "");
 }
 
@@ -75,6 +77,7 @@ fn test_0005() {
     let r = run("http://home.example.org:8888/cookie-parser?0005",
                 &["foo=bar; max-age=10000;"],
                 "http://home.example.org:8888/cookie-parser-result?0005");
+    println!("{:?}", &r);
     assert_eq!(&r, "foo=bar");
 }
 
@@ -84,6 +87,7 @@ fn test_0006() {
     let r = run("http://home.example.org:8888/cookie-parser?0006",
                 &["foo=bar; max-age=0;"],
                 "http://home.example.org:8888/cookie-parser-result?0006");
+    println!("{:?}", &r);
     assert_eq!(&r, "");
 }
 
@@ -97,9 +101,9 @@ fn test_0007() {
 
 #[test]
 fn test_0008() {
-    let r = run("http://home.example.org:8888/cookie-parser?0008",
-                &["foo=bar; version=1000;"],
-                "http://home.example.org:8888/cookie-parser-result?0008");
+   let r = run("http://home.example.org:8888/cookie-parser?0007",
+                &["foo=bar; version=1;"],
+                "http://home.example.org:8888/cookie-parser-result?0007");
     assert_eq!(&r, "foo=bar");
 }
 

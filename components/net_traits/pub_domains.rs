@@ -13,7 +13,6 @@
 //! restricted to appear only in the leftmost position, but the current list has no such cases so
 //! we don't need to make the code more complex for it. The `mach` update command makes sure that
 //! those cases are not present.
-
 use std::collections::HashSet;
 use std::iter::FromIterator;
 use std::str::from_utf8;
