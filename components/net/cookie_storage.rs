@@ -30,14 +30,13 @@ impl CookieStorage {
     // http://tools.ietf.org/html/rfc6265#section-5.3
     pub fn remove(&mut self, cookie: &Cookie, source: CookieSource) -> Result<Option<Cookie>, ()> {
         // Step 0
-        let basedomain = reg_host(&domain).unwrap_or("").to_owned();
-        if !self.cookiesMap.contains_key(&basedomain) {
+        let domain = reg_host(&cookie.cookie.domain.clone().unwrap_or("".to_owned())).unwrap_or("".to_owned());
+        if !self.cookiesMap.contains_key(&domain) {
             let mut cookies: Vec<Cookie> = Vec::new();
-            self.cookiesMap.insert(basedomain, cookies);
+            self.cookiesMap.insert(domain, cookies);
         }
-        let host = ServoUrl::parse(&cookie.cookie.domain.clone().unwrap_or("".to_owned())).unwrap();
-        let basehost = reg_host(&host).unwrap_or("").to_owned();
-        let mut cookies = self.cookiesMap.get_mut(&basehost).unwrap();
+        let mut host = reg_host(&cookie.cookie.domain.clone().unwrap_or("".to_owned())).unwrap_or("".to_owned());
+        let mut cookies = self.cookiesMap.get_mut(&host).unwrap();
 
         // Step 1
         let position = cookies.iter().position(|c| {
@@ -77,15 +76,13 @@ impl CookieStorage {
         }
 
         // Step 12
-        let domain = ServoUrl::parse(&cookie.cookie.domain.clone().unwrap_or("".to_owned())).unwrap();
-        let basedomain = reg_host(&domain).unwrap_or("").to_owned();
-        if !self.cookiesMap.contains_key(&basedomain) {
+        let domain = reg_host(&cookie.cookie.domain.clone().unwrap_or("".to_owned())).unwrap_or("".to_owned());
+        if !self.cookiesMap.contains_key(&domain) {
             let mut cookies: Vec<Cookie> = Vec::new();
-            self.cookiesMap.insert(basedomain, cookies);
+            self.cookiesMap.insert(domain, cookies);
         }
-        let host = ServoUrl::parse(&cookie.cookie.domain.clone().unwrap_or("".to_owned())).unwrap();
-        let basehost = reg_host(&host).unwrap_or("").to_owned();
-        let mut cookies = self.cookiesMap.get_mut(&basehost).unwrap();
+        let host = reg_host(&cookie.cookie.domain.clone().unwrap_or("".to_owned())).unwrap_or("".to_owned());
+        let mut cookies = self.cookiesMap.get_mut(&host).unwrap();
         cookies.push(cookie);
     }
 
@@ -119,12 +116,12 @@ impl CookieStorage {
         };
 
         // Step 2
-        let domain = reg_host(&url).unwrap_or("").to_owned();
+        let domain = reg_host(&url.host_str().unwrap_or("").to_owned()).unwrap();
         if !self.cookiesMap.contains_key(&domain) {
             let mut cookies: Vec<Cookie> = Vec::new();
             self.cookiesMap.insert(domain, cookies);
         }
-        let mut host = reg_host(&url).unwrap_or("").to_owned();
+        let mut host = reg_host(&url.host_str().unwrap_or("").to_owned()).unwrap();
         let mut cookies = self.cookiesMap.get_mut(&host).unwrap();
         let mut url_cookies: Vec<&mut Cookie> = cookies.iter_mut().filter(filterer).collect();
         url_cookies.sort_by(|a, b| CookieStorage::cookie_comparator(*a, *b));
@@ -152,12 +149,12 @@ impl CookieStorage {
                                     url: &'a ServoUrl,
                                     source: CookieSource)
                                     -> Box<Iterator<Item = cookie_rs::Cookie> + 'a> {
-        let basedomain = reg_host(&url).unwrap_or("").to_owned();
-        if !self.cookiesMap.contains_key(&basedomain) {
+        let domain = reg_host(&url.host_str().unwrap_or("").to_owned()).unwrap();
+        if !self.cookiesMap.contains_key(&domain) {
             let mut cookies: Vec<Cookie> = Vec::new();
-            self.cookiesMap.insert(basedomain, cookies);
+            self.cookiesMap.insert(domain, cookies);
         }
-        let mut host = reg_host(&url).unwrap_or("").to_owned();
+        let mut host = reg_host(&url.host_str().unwrap_or("").to_owned()).unwrap();
         let mut cookies = self.cookiesMap.get_mut(&host).unwrap();
 
         Box::new(cookies.iter_mut().filter(move |c| c.appropriate_for_url(url, source)).map(|c| {
@@ -167,6 +164,6 @@ impl CookieStorage {
     }
                                     
 }
-    fn reg_host<'a>(url: &'a ServoUrl) -> Option<&'a str> {
-	    url.domain().map(reg_suffix).or(url.host_str())
+    fn reg_host<'a>(url: &'a str) -> Option<String> {
+	    Some(reg_suffix(url).to_string())
 	}                                
