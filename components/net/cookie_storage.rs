@@ -8,24 +8,24 @@
 use cookie::Cookie;
 use cookie_rs;
 use net_traits::CookieSource;
+use net_traits::pub_domains::reg_suffix;
 use servo_url::ServoUrl;
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use net_traits::pub_domains::reg_suffix;
 
 extern crate time;
 
 #[derive(Clone, Debug, RustcDecodable, RustcEncodable)]
 pub struct CookieStorage {
     version: u32,
-    cookiesMap: HashMap<String, Vec<Cookie>>,
+    cookies_map: HashMap<String, Vec<Cookie>>,
 }
 
 impl CookieStorage {
     pub fn new() -> CookieStorage {
         CookieStorage {
             version: 1,
-            cookiesMap: HashMap::new(),
+            cookies_map: HashMap::new(),
         }
     }
 
@@ -33,12 +33,8 @@ impl CookieStorage {
     pub fn remove(&mut self, cookie: &Cookie, source: CookieSource) -> Result<Option<Cookie>, ()> {
         // Step 0
         let domain = reg_host(&cookie.cookie.domain.clone().unwrap_or("".to_owned())).unwrap_or("".to_owned());
-        if !self.cookiesMap.contains_key(&domain) {
-            let mut cookies: Vec<Cookie> = Vec::new();
-            self.cookiesMap.insert(domain, cookies);
-        }
-        let mut host = reg_host(&cookie.cookie.domain.clone().unwrap_or("".to_owned())).unwrap_or("".to_owned());
-        let mut cookies = self.cookiesMap.get_mut(&host).unwrap();
+        if self.cookies_map.contains_key(&domain) {
+        let mut cookies = self.cookies_map.get_mut(&domain).unwrap();
 
         // Step 1
         let position = cookies.iter().position(|c| {
@@ -47,7 +43,6 @@ impl CookieStorage {
         });
 
         if let Some(ind) = position {
-
             let c = cookies.remove(ind);
 
             // http://tools.ietf.org/html/rfc6265#section-5.3 step 11.2
@@ -59,6 +54,9 @@ impl CookieStorage {
                 Err(())
             }
         } else {
+            Ok(None)
+        }
+        }else {
             Ok(None)
         }
     }
@@ -79,13 +77,13 @@ impl CookieStorage {
 
         // Step 12
         let domain = reg_host(&cookie.cookie.domain.clone().unwrap_or("".to_owned())).unwrap_or("".to_owned());
-        if !self.cookiesMap.contains_key(&domain) {
-            let mut cookies: Vec<Cookie> = Vec::new();
-            self.cookiesMap.insert(domain, cookies);
+        if !self.cookies_map.contains_key(&domain) {
+        let tempdomain = domain.clone();
+            let cookies: Vec<Cookie> = Vec::new();
+            self.cookies_map.insert(tempdomain, cookies);
         }
-        let host = reg_host(&cookie.cookie.domain.clone().unwrap_or("".to_owned())).unwrap_or("".to_owned());
-        let mut cookies = self.cookiesMap.get_mut(&host).unwrap();
-
+        let mut cookies = self.cookies_map.get_mut(&domain).unwrap();
+        
         if cookies.len() == 50 {
             // Step 12.1
             let old_len = cookies.len();
@@ -98,7 +96,7 @@ impl CookieStorage {
                 let mut index = 0;
                 let mut exp_time = cookies.get(0).unwrap().expiry_time.unwrap();
                 for i in 0..cookies.len() {
-                    let mut c = cookies.get(i).unwrap();
+                    let c = cookies.get(i).unwrap();
                     if !c.cookie.secure && c.expiry_time.unwrap() < exp_time {
                         exp_time = c.expiry_time.unwrap();
                         index = i;
@@ -145,12 +143,12 @@ impl CookieStorage {
 
         // Step 2
         let domain = reg_host(&url.host_str().unwrap_or("").to_owned()).unwrap();
-        if !self.cookiesMap.contains_key(&domain) {
-            let mut cookies: Vec<Cookie> = Vec::new();
-            self.cookiesMap.insert(domain, cookies);
+        let host = domain.clone();
+        if !self.cookies_map.contains_key(&domain) {
+            let cookies: Vec<Cookie> = Vec::new();
+            self.cookies_map.insert(domain, cookies);
         }
-        let mut host = reg_host(&url.host_str().unwrap_or("").to_owned()).unwrap();
-        let mut cookies = self.cookiesMap.get_mut(&host).unwrap();
+        let mut cookies = self.cookies_map.get_mut(&host).unwrap();
         let mut url_cookies: Vec<&mut Cookie> = cookies.iter_mut().filter(filterer).collect();
         url_cookies.sort_by(|a, b| CookieStorage::cookie_comparator(*a, *b));
 
@@ -178,31 +176,24 @@ impl CookieStorage {
                                     source: CookieSource)
                                     -> Box<Iterator<Item = cookie_rs::Cookie> + 'a> {
         let domain = reg_host(&url.host_str().unwrap_or("").to_owned()).unwrap();
-        if !self.cookiesMap.contains_key(&domain) {
-            let mut cookies: Vec<Cookie> = Vec::new();
-            self.cookiesMap.insert(domain, cookies);
+        let host = domain.clone();
+        if !self.cookies_map.contains_key(&domain) {
+            let cookies: Vec<Cookie> = Vec::new();
+            self.cookies_map.insert(domain, cookies);
         }
-        let mut host = reg_host(&url.host_str().unwrap_or("").to_owned()).unwrap();
-        let mut cookies = self.cookiesMap.get_mut(&host).unwrap();
+        let mut cookies = self.cookies_map.get_mut(&host).unwrap();
 
         Box::new(cookies.iter_mut().filter(move |c| c.appropriate_for_url(url, source)).map(|c| {
             c.touch();
             c.cookie.clone()
         }))
     }
-
-
-    pub fn evict_expired_cookie<'a>(&'a mut self, mut list: &[Vec<Cookie>]) {
-    }
-
-
-                                    
 }
     fn reg_host<'a>(url: &'a str) -> Option<String> {
 	    Some(reg_suffix(url).to_string())
 	}                                
     
-pub fn check_cookie_expired(cookie: &Cookie) -> bool {
+    fn check_cookie_expired(cookie: &Cookie) -> bool {
         let cookie_expiry_time = cookie.expiry_time.unwrap().to_timespec();
         let cur_time = time::get_time();
 
