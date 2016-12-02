@@ -13,6 +13,8 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use net_traits::pub_domains::reg_suffix;
 
+extern crate time;
+
 #[derive(Clone, Debug, RustcDecodable, RustcEncodable)]
 pub struct CookieStorage {
     version: u32,
@@ -83,6 +85,32 @@ impl CookieStorage {
         }
         let host = reg_host(&cookie.cookie.domain.clone().unwrap_or("".to_owned())).unwrap_or("".to_owned());
         let mut cookies = self.cookiesMap.get_mut(&host).unwrap();
+
+        if cookies.len() == 50 {
+            // Step 12.1
+            let old_len = cookies.len();
+            cookies.retain(|c| !check_cookie_expired(&c));
+            let new_len = cookies.len();
+
+            //https://datatracker.ietf.org/doc/draft-ietf-httpbis-cookie-alone 
+            if new_len == old_len {
+                //Remove non-secure cookie with least expiry time
+                let mut index = 0;
+                let mut exp_time = cookies.get(0).unwrap().expiry_time.unwrap();
+                for i in 0..cookies.len() {
+                    let mut c = cookies.get(i).unwrap();
+                    if !c.cookie.secure && c.expiry_time.unwrap() < exp_time {
+                        exp_time = c.expiry_time.unwrap();
+                        index = i;
+                        break;
+                    }
+                }
+                cookies.remove(index);
+            }
+
+        } else {
+
+        }
         cookies.push(cookie);
     }
 
@@ -162,8 +190,25 @@ impl CookieStorage {
             c.cookie.clone()
         }))
     }
+
+
+    pub fn evict_expired_cookie<'a>(&'a mut self, mut list: &[Vec<Cookie>]) {
+    }
+
+
                                     
 }
     fn reg_host<'a>(url: &'a str) -> Option<String> {
 	    Some(reg_suffix(url).to_string())
 	}                                
+    
+pub fn check_cookie_expired(cookie: &Cookie) -> bool {
+        let cookie_expiry_time = cookie.expiry_time.unwrap().to_timespec();
+        let cur_time = time::get_time();
+
+        if cookie_expiry_time <= cur_time {
+            return true;
+        } else {
+            return false;
+        }
+    }
