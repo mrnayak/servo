@@ -19,7 +19,7 @@ extern crate time;
 pub struct CookieStorage {
     version: u32,
     cookies_map: HashMap<String, Vec<Cookie>>,
-    max_per_host: u32,
+    max_per_host: usize,
 }
 
 impl CookieStorage {
@@ -86,7 +86,7 @@ impl CookieStorage {
         }
         let mut cookies = self.cookies_map.get_mut(&domain).unwrap();
         
-        if cookies.len() == 50 {
+        if cookies.len() == self.max_per_host {
             // Step 12.1
             let old_len = cookies.len();
             cookies.retain(|c| !check_cookie_expired(&c));
