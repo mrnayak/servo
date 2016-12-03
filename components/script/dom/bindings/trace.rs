@@ -41,11 +41,13 @@ use dom::bindings::refcounted::{Trusted, TrustedPromise};
 use dom::bindings::reflector::{Reflectable, Reflector};
 use dom::bindings::str::{DOMString, USVString};
 use dom::bindings::utils::WindowProxyHandler;
+use dom::document::PendingRestyle;
 use encoding::types::EncodingRef;
 use euclid::{Matrix2D, Matrix4D, Point2D};
 use euclid::length::Length as EuclidLength;
 use euclid::rect::Rect;
 use euclid::size::Size2D;
+use html5ever::tokenizer::buffer_queue::BufferQueue;
 use html5ever::tree_builder::QuirksMode;
 use html5ever_atoms::{Prefix, LocalName, Namespace, QualName};
 use hyper::header::Headers;
@@ -58,12 +60,12 @@ use js::jsapi::{GCTraceKindToAscii, Heap, JSObject, JSTracer, TraceKind};
 use js::jsval::JSVal;
 use js::rust::Runtime;
 use libc;
-use msg::constellation_msg::{FrameId, FrameType, PipelineId, ReferrerPolicy};
-use net_traits::{Metadata, NetworkError, ResourceThreads};
+use msg::constellation_msg::{FrameId, FrameType, PipelineId};
+use net_traits::{Metadata, NetworkError, ReferrerPolicy, ResourceThreads};
 use net_traits::filemanager_thread::RelativePos;
 use net_traits::image::base::{Image, ImageMetadata};
 use net_traits::image_cache_thread::{ImageCacheChan, ImageCacheThread};
-use net_traits::request::Request;
+use net_traits::request::{Request, RequestInit};
 use net_traits::response::{Response, ResponseBody};
 use net_traits::response::HttpsState;
 use net_traits::storage_thread::StorageType;
@@ -78,6 +80,7 @@ use script_traits::{TimerEventId, TimerSource, TouchpadPressurePhase};
 use script_traits::{UntrustedNodeAddress, WindowSizeData, WindowSizeType};
 use serde::{Deserialize, Serialize};
 use servo_atoms::Atom;
+use servo_url::ServoUrl;
 use smallvec::SmallVec;
 use std::boxed::FnBox;
 use std::cell::{Cell, UnsafeCell};
@@ -92,13 +95,12 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::time::{SystemTime, Instant};
 use style::attr::{AttrIdentifier, AttrValue, LengthOrPercentageOrAuto};
 use style::element_state::*;
-use style::media_queries::MediaQueryList;
+use style::media_queries::MediaList;
 use style::properties::PropertyDeclarationBlock;
-use style::selector_impl::{ElementSnapshot, PseudoElement};
+use style::selector_parser::{PseudoElement, Snapshot};
 use style::values::specified::Length;
 use time::Duration;
 use url::Origin as UrlOrigin;
-use url::Url;
 use uuid::Uuid;
 use webrender_traits::{WebGLBufferId, WebGLError, WebGLFramebufferId, WebGLProgramId};
 use webrender_traits::{WebGLRenderbufferId, WebGLShaderId, WebGLTextureId};
@@ -192,7 +194,6 @@ impl JSTraceable for Heap<*mut JSObject> {
         trace_object(trc, "heap object", self);
     }
 }
-
 
 impl JSTraceable for Heap<JSVal> {
     fn trace(&self, trc: *mut JSTracer) {
@@ -300,7 +301,7 @@ impl<A: JSTraceable, B: JSTraceable, C: JSTraceable> JSTraceable for (A, B, C) {
     }
 }
 
-no_jsmanaged_fields!(bool, f32, f64, String, Url, AtomicBool, AtomicUsize, UrlOrigin, Uuid, char);
+no_jsmanaged_fields!(bool, f32, f64, String, ServoUrl, AtomicBool, AtomicUsize, UrlOrigin, Uuid, char);
 no_jsmanaged_fields!(usize, u8, u16, u32, u64);
 no_jsmanaged_fields!(isize, i8, i16, i32, i64);
 no_jsmanaged_fields!(Sender<T>);
@@ -322,7 +323,7 @@ no_jsmanaged_fields!(HashSet<T>);
 no_jsmanaged_fields!(FrameId, FrameType, WindowSizeData, WindowSizeType, PipelineId);
 no_jsmanaged_fields!(TimerEventId, TimerSource);
 no_jsmanaged_fields!(WorkerId);
-no_jsmanaged_fields!(QuirksMode);
+no_jsmanaged_fields!(BufferQueue, QuirksMode);
 no_jsmanaged_fields!(Runtime);
 no_jsmanaged_fields!(Headers, Method);
 no_jsmanaged_fields!(WindowProxyHandler);
@@ -346,9 +347,11 @@ no_jsmanaged_fields!(DOMString);
 no_jsmanaged_fields!(Mime);
 no_jsmanaged_fields!(AttrIdentifier);
 no_jsmanaged_fields!(AttrValue);
-no_jsmanaged_fields!(ElementSnapshot);
+no_jsmanaged_fields!(Snapshot);
+no_jsmanaged_fields!(PendingRestyle);
 no_jsmanaged_fields!(HttpsState);
 no_jsmanaged_fields!(Request);
+no_jsmanaged_fields!(RequestInit);
 no_jsmanaged_fields!(SharedRt);
 no_jsmanaged_fields!(TouchpadPressurePhase);
 no_jsmanaged_fields!(USVString);
@@ -369,7 +372,7 @@ no_jsmanaged_fields!(WebGLProgramId);
 no_jsmanaged_fields!(WebGLRenderbufferId);
 no_jsmanaged_fields!(WebGLShaderId);
 no_jsmanaged_fields!(WebGLTextureId);
-no_jsmanaged_fields!(MediaQueryList);
+no_jsmanaged_fields!(MediaList);
 
 impl JSTraceable for Box<ScriptChan + Send> {
     #[inline]

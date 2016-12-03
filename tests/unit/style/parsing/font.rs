@@ -4,12 +4,13 @@
 
 use cssparser::Parser;
 use media_queries::CSSErrorReporterTest;
+use servo_url::ServoUrl;
 use style::parser::ParserContext;
 use style::properties::longhands::font_feature_settings;
 use style::properties::longhands::font_feature_settings::computed_value;
 use style::properties::longhands::font_feature_settings::computed_value::FeatureTagValue;
 use style::stylesheets::Origin;
-use url::Url;
+use style_traits::ToCss;
 
 #[test]
 fn font_feature_settings_should_parse_properly() {
@@ -51,7 +52,7 @@ fn font_feature_settings_should_parse_properly() {
 
 #[test]
 fn font_feature_settings_should_throw_on_bad_input() {
-    let url = Url::parse("http://localhost").unwrap();
+    let url = ServoUrl::parse("http://localhost").unwrap();
     let context = ParserContext::new(Origin::Author, &url, Box::new(CSSErrorReporterTest));
 
     let mut empty = Parser::new("");
@@ -100,7 +101,7 @@ fn font_language_override_should_parse_properly() {
 #[test]
 #[should_panic]
 fn font_language_override_should_fail_on_empty_str() {
-    use style::properties::longhands::font_language_override::{self, SpecifiedValue};
+    use style::properties::longhands::font_language_override;
 
     parse_longhand!(font_language_override, "");
 }

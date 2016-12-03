@@ -14,12 +14,12 @@ use parking_lot::RwLock;
 use properties::{ComputedValues, PropertyDeclarationBlock};
 use properties::longhands::display::computed_value as display;
 use restyle_hints::{RESTYLE_DESCENDANTS, RESTYLE_LATER_SIBLINGS, RESTYLE_SELF, RestyleHint};
-use selector_impl::{ElementExt, PseudoElement};
-use selector_matching::ApplicableDeclarationBlock;
+use selector_parser::{ElementExt, PseudoElement, RestyleDamage};
 use sink::Push;
 use std::fmt::Debug;
 use std::ops::BitOr;
 use std::sync::Arc;
+use stylist::ApplicableDeclarationBlock;
 use traversal::DomTraversalContext;
 use util::opts;
 
@@ -105,8 +105,7 @@ impl<T, I> Iterator for LayoutIterator<T> where T: Iterator<Item=I>, I: NodeInfo
 }
 
 pub trait TNode : Sized + Copy + Clone + NodeInfo {
-    type ConcreteElement: TElement<ConcreteNode = Self, ConcreteDocument = Self::ConcreteDocument>;
-    type ConcreteDocument: TDocument<ConcreteNode = Self, ConcreteElement = Self::ConcreteElement>;
+    type ConcreteElement: TElement<ConcreteNode = Self>;
     type ConcreteChildrenIterator: Iterator<Item = Self>;
 
     fn to_unsafe(&self) -> UnsafeNode;
@@ -130,8 +129,6 @@ pub trait TNode : Sized + Copy + Clone + NodeInfo {
 
     fn as_element(&self) -> Option<Self::ConcreteElement>;
 
-    fn as_document(&self) -> Option<Self::ConcreteDocument>;
-
     fn needs_dirty_on_viewport_size_changed(&self) -> bool;
 
     unsafe fn set_dirty_on_viewport_size_changed(&self);
@@ -151,30 +148,13 @@ pub trait TNode : Sized + Copy + Clone + NodeInfo {
     fn next_sibling(&self) -> Option<Self>;
 }
 
-pub trait TDocument : Sized + Copy + Clone {
-    type ConcreteNode: TNode<ConcreteElement = Self::ConcreteElement, ConcreteDocument = Self>;
-    type ConcreteElement: TElement<ConcreteNode = Self::ConcreteNode, ConcreteDocument = Self>;
-
-    fn as_node(&self) -> Self::ConcreteNode;
-
-    fn root_node(&self) -> Option<Self::ConcreteNode>;
-
-    fn drain_modified_elements(&self) -> Vec<(Self::ConcreteElement,
-                                              <Self::ConcreteElement as ElementExt>::Snapshot)>;
-
-    fn needs_paint_from_layout(&self);
-    fn will_paint(&self);
-}
-
 pub trait PresentationalHintsSynthetizer {
     fn synthesize_presentational_hints_for_legacy_attributes<V>(&self, hints: &mut V)
         where V: Push<ApplicableDeclarationBlock>;
 }
 
 pub trait TElement : PartialEq + Debug + Sized + Copy + Clone + ElementExt + PresentationalHintsSynthetizer {
-    type ConcreteNode: TNode<ConcreteElement = Self, ConcreteDocument = Self::ConcreteDocument>;
-    type ConcreteDocument: TDocument<ConcreteNode = Self::ConcreteNode, ConcreteElement = Self>;
-    type ConcreteRestyleDamage: TRestyleDamage;
+    type ConcreteNode: TNode<ConcreteElement = Self>;
 
     fn as_node(&self) -> Self::ConcreteNode;
 
@@ -186,7 +166,7 @@ pub trait TElement : PartialEq + Debug + Sized + Copy + Clone + ElementExt + Pre
     fn attr_equals(&self, namespace: &Namespace, attr: &LocalName, value: &Atom) -> bool;
 
     /// Set the restyle damage field.
-    fn set_restyle_damage(self, damage: Self::ConcreteRestyleDamage);
+    fn set_restyle_damage(self, damage: RestyleDamage);
 
     /// XXX: It's a bit unfortunate we need to pass the current computed values
     /// as an argument here, but otherwise Servo would crash due to double
@@ -194,7 +174,7 @@ pub trait TElement : PartialEq + Debug + Sized + Copy + Clone + ElementExt + Pre
     fn existing_style_for_restyle_damage<'a>(&'a self,
                                              current_computed_values: Option<&'a Arc<ComputedValues>>,
                                              pseudo: Option<&PseudoElement>)
-        -> Option<&'a <Self::ConcreteRestyleDamage as TRestyleDamage>::PreExistingComputedValues>;
+        -> Option<&'a <RestyleDamage as TRestyleDamage>::PreExistingComputedValues>;
 
     /// The concept of a dirty bit doesn't exist in our new restyle algorithm.
     /// Instead, we associate restyle and change hints with nodes. However, we

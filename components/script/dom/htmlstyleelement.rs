@@ -7,8 +7,9 @@ use dom::bindings::cell::DOMRefCell;
 use dom::bindings::codegen::Bindings::HTMLStyleElementBinding;
 use dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use dom::bindings::inheritance::Castable;
-use dom::bindings::js::Root;
+use dom::bindings::js::{JS, MutNullableHeap, Root};
 use dom::bindings::str::DOMString;
+use dom::cssstylesheet::CSSStyleSheet;
 use dom::document::Document;
 use dom::element::Element;
 use dom::htmlelement::HTMLElement;
@@ -26,6 +27,7 @@ pub struct HTMLStyleElement {
     htmlelement: HTMLElement,
     #[ignore_heap_size_of = "Arc"]
     stylesheet: DOMRefCell<Option<Arc<Stylesheet>>>,
+    cssom_stylesheet: MutNullableHeap<JS<CSSStyleSheet>>,
 }
 
 impl HTMLStyleElement {
@@ -35,6 +37,7 @@ impl HTMLStyleElement {
         HTMLStyleElement {
             htmlelement: HTMLElement::new_inherited(local_name, prefix, document),
             stylesheet: DOMRefCell::new(None),
+            cssom_stylesheet: MutNullableHeap::new(None),
         }
     }
 
@@ -62,11 +65,9 @@ impl HTMLStyleElement {
         };
 
         let data = node.GetTextContent().expect("Element.textContent must be a string");
-        let mut sheet = Stylesheet::from_str(&data, url, Origin::Author, win.css_error_reporter(),
-                                             ParserContextExtraData::default());
-        let mut css_parser = CssParser::new(&mq_str);
-        let media = parse_media_query_list(&mut css_parser);
-        sheet.set_media(Some(media));
+        let mq = parse_media_query_list(&mut CssParser::new(&mq_str));
+        let sheet = Stylesheet::from_str(&data, url, Origin::Author, mq, win.css_error_reporter(),
+                                         ParserContextExtraData::default());
         let sheet = Arc::new(sheet);
 
         win.layout_chan().send(Msg::AddStylesheet(sheet.clone())).unwrap();
@@ -77,6 +78,18 @@ impl HTMLStyleElement {
 
     pub fn get_stylesheet(&self) -> Option<Arc<Stylesheet>> {
         self.stylesheet.borrow().clone()
+    }
+
+    pub fn get_cssom_stylesheet(&self) -> Option<Root<CSSStyleSheet>> {
+        self.get_stylesheet().map(|sheet| {
+            self.cssom_stylesheet.or_init(|| {
+                CSSStyleSheet::new(&window_from_node(self),
+                                   "text/css".into(),
+                                   None, // todo handle location
+                                   None, // todo handle title
+                                   sheet)
+            })
+        })
     }
 }
 

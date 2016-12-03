@@ -5,11 +5,12 @@
 
 pub mod context;
 pub mod data;
+pub mod restyle_damage;
 pub mod snapshot;
 pub mod snapshot_helpers;
 pub mod traversal;
 pub mod wrapper;
 
 pub mod conversions;
-pub mod selector_impl;
+pub mod selector_parser;
 pub mod values;

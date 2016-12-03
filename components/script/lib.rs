@@ -32,6 +32,7 @@ extern crate audio_video_metadata;
 #[allow(unused_extern_crates)]
 #[macro_use]
 extern crate bitflags;
+extern crate bluetooth_traits;
 extern crate canvas_traits;
 extern crate caseless;
 extern crate cookie as cookie_rs;
@@ -47,6 +48,7 @@ extern crate heapsize;
 #[macro_use] extern crate heapsize_derive;
 extern crate html5ever;
 #[macro_use] extern crate html5ever_atoms;
+#[macro_use]
 extern crate hyper;
 extern crate hyper_serde;
 extern crate image;
@@ -80,6 +82,7 @@ extern crate script_traits;
 extern crate selectors;
 extern crate serde;
 #[macro_use] extern crate servo_atoms;
+extern crate servo_url;
 extern crate smallvec;
 #[macro_use]
 extern crate style;
@@ -95,7 +98,6 @@ extern crate webrender_traits;
 extern crate websocket;
 extern crate xml5ever;
 
-pub mod bluetooth_blacklist;
 mod body;
 pub mod clipboard_provider;
 mod devtools;
@@ -111,6 +113,7 @@ pub mod script_runtime;
 #[allow(unsafe_code)]
 pub mod script_thread;
 mod serviceworker_manager;
+mod serviceworkerjob;
 mod task_source;
 pub mod textinput;
 mod timers;
@@ -163,18 +166,20 @@ fn perform_platform_specific_initialization() {
 #[cfg(not(target_os = "linux"))]
 fn perform_platform_specific_initialization() {}
 
-#[allow(unsafe_code)]
-pub fn init(sw_senders: SWManagerSenders) {
-    unsafe {
-        proxyhandler::init();
-    }
-
+pub fn init_service_workers(sw_senders: SWManagerSenders) {
     // Spawn the service worker manager passing the constellation sender
     ServiceWorkerManager::spawn_manager(sw_senders);
+}
 
-    // Create the global vtables used by the (generated) DOM
-    // bindings to implement JS proxies.
-    RegisterBindings::RegisterProxyHandlers();
+#[allow(unsafe_code)]
+pub fn init() {
+    unsafe {
+        proxyhandler::init();
+
+        // Create the global vtables used by the (generated) DOM
+        // bindings to implement JS proxies.
+        RegisterBindings::RegisterProxyHandlers();
+    }
 
     perform_platform_specific_initialization();
 }

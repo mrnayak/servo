@@ -22,7 +22,9 @@ pub struct ProfilerChan(pub IpcSender<ProfilerMsg>);
 
 impl ProfilerChan {
     pub fn send(&self, msg: ProfilerMsg) {
-        self.0.send(msg).unwrap();
+        if let Err(e) = self.0.send(msg) {
+            warn!("Error communicating with the time profiler thread: {}", e);
+        }
     }
 }
 

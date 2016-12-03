@@ -10,8 +10,9 @@ extern crate geckoservo;
 extern crate libc;
 #[macro_use] extern crate log;
 extern crate parking_lot;
+extern crate servo_url;
 extern crate style;
-extern crate url;
+extern crate style_traits;
 
 mod sanity_checks;
 

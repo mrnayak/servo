@@ -49,7 +49,6 @@ extern crate cfg_if;
 extern crate core;
 #[macro_use]
 extern crate cssparser;
-extern crate deque;
 extern crate encoding;
 extern crate euclid;
 extern crate fnv;
@@ -60,7 +59,6 @@ extern crate heapsize;
 #[allow(unused_extern_crates)]
 #[macro_use]
 extern crate lazy_static;
-#[cfg(feature = "gecko")] extern crate libc;
 #[macro_use]
 extern crate log;
 #[allow(unused_extern_crates)]
@@ -74,20 +72,20 @@ extern crate ordered_float;
 extern crate owning_ref;
 extern crate parking_lot;
 extern crate quickersort;
-extern crate rand;
+extern crate rayon;
 extern crate rustc_serialize;
 extern crate selectors;
 #[cfg(feature = "servo")]
 extern crate serde;
 #[cfg(feature = "servo")] #[macro_use] extern crate serde_derive;
 #[cfg(feature = "servo")] #[macro_use] extern crate servo_atoms;
+extern crate servo_url;
 extern crate smallvec;
 #[macro_use]
 extern crate style_traits;
 extern crate time;
 #[allow(unused_extern_crates)]
 extern crate unicode_segmentation;
-extern crate url;
 extern crate util;
 
 pub mod animation;
@@ -103,6 +101,7 @@ pub mod dom;
 pub mod element_state;
 pub mod error_reporting;
 pub mod font_face;
+pub mod font_metrics;
 #[cfg(feature = "gecko")] #[allow(unsafe_code)] pub mod gecko;
 #[cfg(feature = "gecko")] #[allow(unsafe_code)] pub mod gecko_bindings;
 pub mod keyframes;
@@ -114,10 +113,11 @@ pub mod parallel;
 pub mod parser;
 pub mod refcell;
 pub mod restyle_hints;
-pub mod selector_impl;
-pub mod selector_matching;
+pub mod rule_tree;
+pub mod selector_parser;
+pub mod stylist;
+#[cfg(feature = "servo")] #[allow(unsafe_code)] pub mod servo;
 pub mod sequential;
-#[cfg(feature = "servo")] pub mod servo_selector_impl;
 pub mod sink;
 pub mod str;
 pub mod stylesheets;
@@ -129,11 +129,10 @@ pub mod traversal;
 #[allow(non_camel_case_types)]
 pub mod values;
 pub mod viewport;
-pub mod workqueue;
 
-use cssparser::ToCss;
 use std::fmt;
 use std::sync::Arc;
+use style_traits::ToCss;
 
 #[cfg(feature = "gecko")] pub use gecko_string_cache as string_cache;
 #[cfg(feature = "gecko")] pub use gecko_string_cache::Atom;

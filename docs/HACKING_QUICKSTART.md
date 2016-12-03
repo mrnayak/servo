@@ -123,7 +123,7 @@ paths = ['../glutin', '../cocoa-rs']
 
 This will tell any cargo project to not use the online version of the dependency, but your local clone.
 
-For more details about overriding dependencies, see [Cargo's documentation](http://doc.crates.io/guide.html#overriding-dependencies).
+For more details about overriding dependencies, see [Cargo's documentation](http://doc.crates.io/specifying-dependencies.html#overriding-dependencies).
 
 ## Debugging
 
@@ -259,6 +259,10 @@ If you need to create a new test file, it should be located in `tests/wpt/mozill
 ```
 ./mach test-wpt --manifest-update
 ```
+
+### Debugging a test
+
+See the [debugging guide](./debugging.md) to get started in how to debug Servo.
 
 ## Documentation:
 

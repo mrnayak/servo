@@ -15,7 +15,6 @@ use dom::node::Node;
 use dom::window::Window;
 use html5ever_atoms::{LocalName, QualName};
 use servo_atoms::Atom;
-use std::ascii::AsciiExt;
 use std::cell::Cell;
 use style::str::split_html_space_chars;
 
@@ -114,37 +113,50 @@ impl HTMLCollection {
         }
     }
 
-    pub fn by_tag_name(window: &Window, root: &Node, mut tag: DOMString)
-                       -> Root<HTMLCollection> {
-        let tag_atom = LocalName::from(&*tag);
-        tag.make_ascii_lowercase();
-        let ascii_lower_tag = LocalName::from(tag); // FIXME(ajeffrey): don't clone atom if it was already lowercased.
-        HTMLCollection::by_atomic_tag_name(window, root, tag_atom, ascii_lower_tag)
-    }
-
-    pub fn by_atomic_tag_name(window: &Window, root: &Node, tag_atom: LocalName, ascii_lower_tag: LocalName)
-                       -> Root<HTMLCollection> {
-        #[derive(JSTraceable, HeapSizeOf)]
-        struct TagNameFilter {
-            tag: LocalName,
-            ascii_lower_tag: LocalName,
-        }
-        impl CollectionFilter for TagNameFilter {
-            fn filter(&self, elem: &Element, _root: &Node) -> bool {
-                if self.tag == local_name!("*") {
+    // https://dom.spec.whatwg.org/#concept-getelementsbytagname
+    pub fn by_qualified_name(window: &Window, root: &Node, qualified_name: LocalName)
+                             -> Root<HTMLCollection> {
+        // case 1
+        if qualified_name == local_name!("*") {
+            #[derive(JSTraceable, HeapSizeOf)]
+            struct AllFilter;
+            impl CollectionFilter for AllFilter {
+                fn filter(&self, _elem: &Element, _root: &Node) -> bool {
                     true
-                } else if elem.html_element_in_html_document() {
-                    *elem.local_name() == self.ascii_lower_tag
-                } else {
-                    *elem.local_name() == self.tag
+                }
+            }
+            return HTMLCollection::create(window, root, box AllFilter);
+        }
+
+        #[derive(JSTraceable, HeapSizeOf)]
+        struct HtmlDocumentFilter {
+            qualified_name: LocalName,
+            ascii_lower_qualified_name: LocalName,
+        }
+        impl CollectionFilter for HtmlDocumentFilter {
+            fn filter(&self, elem: &Element, root: &Node) -> bool {
+                if root.is_in_html_doc() && elem.namespace() == &ns!(html) {    // case 2
+                    HTMLCollection::match_element(elem, &self.ascii_lower_qualified_name)
+                } else {    // case 2 and 3
+                    HTMLCollection::match_element(elem, &self.qualified_name)
                 }
             }
         }
-        let filter = TagNameFilter {
-            tag: tag_atom,
-            ascii_lower_tag: ascii_lower_tag,
+
+        let filter = HtmlDocumentFilter {
+            ascii_lower_qualified_name: qualified_name.to_ascii_lowercase(),
+            qualified_name: qualified_name,
         };
         HTMLCollection::create(window, root, box filter)
+    }
+
+    fn match_element(elem: &Element, qualified_name: &LocalName) -> bool {
+        match *elem.prefix() {
+            None => elem.local_name() == qualified_name,
+            Some(ref prefix) => qualified_name.starts_with(prefix as &str) &&
+                qualified_name.find(":") == Some((prefix as &str).len()) &&
+                qualified_name.ends_with(elem.local_name() as &str),
+        }
     }
 
     pub fn by_tag_name_ns(window: &Window, root: &Node, tag: DOMString,
@@ -206,24 +218,24 @@ impl HTMLCollection {
         HTMLCollection::create(window, root, box ElementChildFilter)
     }
 
-    pub fn elements_iter_after(&self, after: &Node) -> HTMLCollectionElementsIter {
+    pub fn elements_iter_after<'a>(&'a self, after: &'a Node) -> impl Iterator<Item=Root<Element>> + 'a {
         // Iterate forwards from a node.
         HTMLCollectionElementsIter {
-            node_iter: box after.following_nodes(&self.root),
+            node_iter: after.following_nodes(&self.root),
             root: Root::from_ref(&self.root),
             filter: &self.filter,
         }
     }
 
-    pub fn elements_iter(&self) -> HTMLCollectionElementsIter {
+    pub fn elements_iter<'a>(&'a self) -> impl Iterator<Item=Root<Element>> + 'a {
         // Iterate forwards from the root.
         self.elements_iter_after(&*self.root)
     }
 
-    pub fn elements_iter_before(&self, before: &Node) -> HTMLCollectionElementsIter {
+    pub fn elements_iter_before<'a>(&'a self, before: &'a Node) -> impl Iterator<Item=Root<Element>> + 'a {
         // Iterate backwards from a node.
         HTMLCollectionElementsIter {
-            node_iter: box before.preceding_nodes(&self.root),
+            node_iter: before.preceding_nodes(&self.root),
             root: Root::from_ref(&self.root),
             filter: &self.filter,
         }
@@ -235,13 +247,13 @@ impl HTMLCollection {
 }
 
 // TODO: Make this generic, and avoid code duplication
-pub struct HTMLCollectionElementsIter<'a> {
-    node_iter: Box<Iterator<Item = Root<Node>>>,
+struct HTMLCollectionElementsIter<'a, I> {
+    node_iter: I,
     root: Root<Node>,
     filter: &'a Box<CollectionFilter>,
 }
 
-impl<'a> Iterator for HTMLCollectionElementsIter<'a> {
+impl<'a, I: Iterator<Item=Root<Node>>> Iterator for HTMLCollectionElementsIter<'a, I> {
     type Item = Root<Element>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -285,13 +297,15 @@ impl HTMLCollectionMethods for HTMLCollection {
                     // Iterate forwards, starting at the cursor.
                     let offset = index - (cached_index + 1);
                     let node: Root<Node> = Root::upcast(element);
-                    self.set_cached_cursor(index, self.elements_iter_after(&node).nth(offset as usize))
+                    let mut iter = self.elements_iter_after(&node);
+                    self.set_cached_cursor(index, iter.nth(offset as usize))
                 } else {
                     // The cursor is after the element we're looking for
                     // Iterate backwards, starting at the cursor.
                     let offset = cached_index - (index + 1);
                     let node: Root<Node> = Root::upcast(element);
-                    self.set_cached_cursor(index, self.elements_iter_before(&node).nth(offset as usize))
+                    let mut iter = self.elements_iter_before(&node);
+                    self.set_cached_cursor(index, iter.nth(offset as usize))
                 }
             } else {
                 // Cache miss

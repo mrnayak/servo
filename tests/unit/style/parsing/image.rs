@@ -7,7 +7,7 @@ use media_queries::CSSErrorReporterTest;
 use style::parser::ParserContext;
 use style::stylesheets::Origin;
 use style::values::specified::image::*;
-use url::Url;
+use style_traits::ToCss;
 
 #[test]
 fn test_linear_gradient() {

@@ -42,13 +42,14 @@ use js::jsval::{NullValue, UndefinedValue};
 use msg::constellation_msg::{FrameType, FrameId, PipelineId, TraversalDirection};
 use net_traits::response::HttpsState;
 use script_layout_interface::message::ReflowQueryType;
+use script_thread::ScriptThread;
 use script_traits::{IFrameLoadInfo, LoadData, MozBrowserEvent, ScriptMsg as ConstellationMsg};
 use script_traits::IFrameSandboxState::{IFrameSandboxed, IFrameUnsandboxed};
 use servo_atoms::Atom;
+use servo_url::ServoUrl;
 use std::cell::Cell;
 use style::attr::{AttrValue, LengthOrPercentageOrAuto};
 use style::context::ReflowGoal;
-use url::Url;
 use util::prefs::PREFS;
 use util::servo_version;
 
@@ -83,7 +84,7 @@ impl HTMLIFrameElement {
 
     /// <https://html.spec.whatwg.org/multipage/#otherwise-steps-for-iframe-or-frame-elements>,
     /// step 1.
-    fn get_url(&self) -> Url {
+    fn get_url(&self) -> ServoUrl {
         let element = self.upcast::<Element>();
         element.get_attribute(&ns!(), &local_name!("src")).and_then(|src| {
             let url = src.value();
@@ -92,7 +93,7 @@ impl HTMLIFrameElement {
             } else {
                 document_from_node(self).base_url().join(&url).ok()
             }
-        }).unwrap_or_else(|| Url::parse("about:blank").unwrap())
+        }).unwrap_or_else(|| ServoUrl::parse("about:blank").unwrap())
     }
 
     pub fn generate_new_pipeline_id(&self) -> (Option<PipelineId>, PipelineId) {
@@ -156,7 +157,7 @@ impl HTMLIFrameElement {
 
         let document = document_from_node(self);
         self.navigate_or_reload_child_browsing_context(
-            Some(LoadData::new(url, document.get_referrer_policy(), Some(document.url().clone()))), false);
+            Some(LoadData::new(url, document.get_referrer_policy(), Some(document.url()))), false);
     }
 
     #[allow(unsafe_code)]
@@ -207,6 +208,11 @@ impl HTMLIFrameElement {
         self.pipeline_id.get()
     }
 
+    #[inline]
+    pub fn frame_id(&self) -> FrameId {
+        self.frame_id
+    }
+
     pub fn change_visibility_status(&self, visibility: bool) {
         if self.visibility.get() != visibility {
             self.visibility.set(visibility);
@@ -230,7 +236,7 @@ impl HTMLIFrameElement {
     pub fn iframe_load_event_steps(&self, loaded_pipeline: PipelineId) {
         // TODO(#9592): assert that the load blocker is present at all times when we
         //              can guarantee that it's created for the case of iframe.reload().
-        assert_eq!(loaded_pipeline, self.pipeline_id().unwrap());
+        if Some(loaded_pipeline) != self.pipeline_id() { return; }
 
         // TODO A cross-origin child document would not be easily accessible
         //      from this script thread. It's unclear how to implement
@@ -239,7 +245,7 @@ impl HTMLIFrameElement {
         // TODO Step 3 - set child document  `mut iframe load` flag
 
         // Step 4
-        self.upcast::<EventTarget>().fire_simple_event("load");
+        self.upcast::<EventTarget>().fire_event(atom!("load"));
 
         let mut blocker = self.load_blocker.borrow_mut();
         LoadBlocker::terminate(&mut blocker);
@@ -263,13 +269,16 @@ impl HTMLIFrameElement {
     }
 
     pub fn get_content_window(&self) -> Option<Root<Window>> {
-        self.pipeline_id.get().and_then(|pipeline_id| {
-            let window = window_from_node(self);
-            let browsing_context = window.browsing_context();
-            browsing_context.find_child_by_id(pipeline_id)
-        })
+        self.pipeline_id.get()
+            .and_then(|pipeline_id| ScriptThread::find_document(pipeline_id))
+            .and_then(|document| {
+                if self.global().get_url().origin() == document.global().get_url().origin() {
+                    Some(Root::from_ref(document.window()))
+                } else {
+                    None
+                }
+            })
     }
-
 }
 
 pub trait HTMLIFrameElementLayoutMethods {

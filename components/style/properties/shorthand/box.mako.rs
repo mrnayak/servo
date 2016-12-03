@@ -53,7 +53,7 @@
 macro_rules! try_parse_one {
     ($input: expr, $var: ident, $prop_module: ident) => {
         if $var.is_none() {
-            if let Ok(value) = $input.try($prop_module::parse_one) {
+            if let Ok(value) = $input.try($prop_module::computed_value::SingleComputedValue::parse) {
                 $var = Some(value);
                 continue;
             }
@@ -65,6 +65,7 @@ macro_rules! try_parse_one {
                     sub_properties="transition-property transition-duration
                                     transition-timing-function
                                     transition-delay">
+    use parser::Parse;
     use properties::longhands::{transition_delay, transition_duration, transition_property};
     use properties::longhands::{transition_timing_function};
 
@@ -94,8 +95,7 @@ macro_rules! try_parse_one {
                     transition_duration:
                         duration.unwrap_or_else(transition_duration::get_initial_single_value),
                     transition_timing_function:
-                        timing_function.unwrap_or_else(
-                            transition_timing_function::get_initial_single_value),
+                        timing_function.unwrap_or_else(transition_timing_function::get_initial_single_value),
                     transition_delay:
                         delay.unwrap_or_else(transition_delay::get_initial_single_value),
                 })
@@ -154,6 +154,7 @@ macro_rules! try_parse_one {
                                     animation-iteration-count animation-direction
                                     animation-fill-mode animation-play-state"
                     allowed_in_keyframe_block="False">
+    use parser::Parse;
     use properties::longhands::{animation_name, animation_duration, animation_timing_function};
     use properties::longhands::{animation_delay, animation_iteration_count, animation_direction};
     use properties::longhands::{animation_fill_mode, animation_play_state};
@@ -210,11 +211,11 @@ macro_rules! try_parse_one {
                     animation_iteration_count:
                         iteration_count.unwrap_or_else(animation_iteration_count::get_initial_single_value),
                     animation_direction:
-                        direction.unwrap_or_else(animation_direction::get_initial_single_value),
+                        direction.unwrap_or_else(animation_direction::single_value::get_initial_value),
                     animation_fill_mode:
-                        fill_mode.unwrap_or_else(animation_fill_mode::get_initial_single_value),
+                        fill_mode.unwrap_or_else(animation_fill_mode::single_value::get_initial_value),
                     animation_play_state:
-                        play_state.unwrap_or_else(animation_play_state::get_initial_single_value),
+                        play_state.unwrap_or_else(animation_play_state::single_value::get_initial_value),
                 })
             } else {
                 Err(())
@@ -294,6 +295,40 @@ macro_rules! try_parse_one {
             try!(write!(dest, " "));
 
             self.animation_name.to_css(dest)
+        }
+    }
+</%helpers:shorthand>
+
+<%helpers:shorthand name="scroll-snap-type" products="gecko"
+                    sub_properties="scroll-snap-type-x scroll-snap-type-y">
+    use properties::longhands::scroll_snap_type_x;
+
+    pub fn parse_value(context: &ParserContext, input: &mut Parser) -> Result<Longhands, ()> {
+        let result = try!(scroll_snap_type_x::parse(context, input));
+        Ok(Longhands {
+            scroll_snap_type_x: Some(result),
+            scroll_snap_type_y: Some(result),
+        })
+    }
+
+    impl<'a> LonghandsToSerialize<'a>  {
+        // Serializes into the single keyword value if both scroll-snap-type and scroll-snap-type-y are same.
+        // Otherwise into an empty string. This is done to match Gecko's behaviour.
+        fn to_css_declared<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+            let x_and_y_equal = match (self.scroll_snap_type_x, self.scroll_snap_type_y) {
+                (&DeclaredValue::Value(ref x_value), &DeclaredValue::Value(ref y_value)) => {
+                    *x_value == *y_value
+                },
+                (&DeclaredValue::Initial, &DeclaredValue::Initial) => true,
+                (&DeclaredValue::Inherit, &DeclaredValue::Inherit) => true,
+                (x, y) => { *x == *y },
+            };
+
+            if x_and_y_equal {
+                self.scroll_snap_type_x.to_css(dest)
+            } else {
+                Ok(())
+            }
         }
     }
 </%helpers:shorthand>

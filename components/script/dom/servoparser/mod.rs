@@ -2,47 +2,41 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use document_loader::LoadType;
+use document_loader::{DocumentLoader, LoadType};
 use dom::bindings::cell::DOMRefCell;
 use dom::bindings::codegen::Bindings::DocumentBinding::DocumentMethods;
 use dom::bindings::codegen::Bindings::HTMLImageElementBinding::HTMLImageElementMethods;
 use dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use dom::bindings::codegen::Bindings::ServoParserBinding;
 use dom::bindings::inheritance::Castable;
-use dom::bindings::js::{JS, Root};
+use dom::bindings::js::{JS, Root, RootedReference};
 use dom::bindings::refcounted::Trusted;
 use dom::bindings::reflector::{Reflector, reflect_dom_object};
 use dom::bindings::str::DOMString;
-use dom::bindings::trace::JSTraceable;
-use dom::document::Document;
+use dom::document::{Document, DocumentSource, IsHTMLDocument};
 use dom::globalscope::GlobalScope;
+use dom::htmlformelement::HTMLFormElement;
 use dom::htmlimageelement::HTMLImageElement;
-use dom::node::Node;
+use dom::htmlscriptelement::HTMLScriptElement;
+use dom::node::{Node, document_from_node, window_from_node};
 use encoding::all::UTF_8;
 use encoding::types::{DecoderTrap, Encoding};
-use html5ever::tokenizer::Tokenizer as H5ETokenizer;
 use html5ever::tokenizer::buffer_queue::BufferQueue;
-use html5ever::tree_builder::Tracer as HtmlTracer;
-use html5ever::tree_builder::TreeBuilder as HtmlTreeBuilder;
 use hyper::header::ContentType;
 use hyper::mime::{Mime, SubLevel, TopLevel};
 use hyper_serde::Serde;
-use js::jsapi::JSTracer;
 use msg::constellation_msg::PipelineId;
 use net_traits::{FetchMetadata, FetchResponseListener, Metadata, NetworkError};
 use network_listener::PreInvoke;
 use profile_traits::time::{TimerMetadata, TimerMetadataFrameType};
 use profile_traits::time::{TimerMetadataReflowType, ProfilerCategory, profile};
 use script_thread::ScriptThread;
+use servo_url::ServoUrl;
 use std::cell::Cell;
-use std::collections::VecDeque;
-use url::Url;
 use util::resource_files::read_resource_file;
-use xml5ever::tokenizer::XmlTokenizer;
-use xml5ever::tree_builder::{Tracer as XmlTracer, XmlTreeBuilder};
 
-pub mod html;
-pub mod xml;
+mod html;
+mod xml;
 
 #[dom_struct]
 pub struct ServoParser {
@@ -53,7 +47,8 @@ pub struct ServoParser {
     /// does not correspond to a page load.
     pipeline: Option<PipelineId>,
     /// Input chunks received but not yet passed to the parser.
-    pending_input: DOMRefCell<VecDeque<String>>,
+    #[ignore_heap_size_of = "Defined in html5ever"]
+    pending_input: DOMRefCell<BufferQueue>,
     /// The tokenizer of this parser.
     tokenizer: DOMRefCell<Tokenizer>,
     /// Whether to expect any further input from the associated network request.
@@ -69,6 +64,76 @@ enum LastChunkState {
 }
 
 impl ServoParser {
+    pub fn parse_html_document(
+            document: &Document,
+            input: DOMString,
+            url: ServoUrl,
+            owner: Option<PipelineId>) {
+        let parser = ServoParser::new(
+            document,
+            owner,
+            Tokenizer::Html(self::html::Tokenizer::new(document, url, None)),
+            LastChunkState::NotReceived);
+        parser.parse_chunk(String::from(input));
+    }
+
+    // https://html.spec.whatwg.org/multipage/#parsing-html-fragments
+    pub fn parse_html_fragment(
+            context_node: &Node,
+            input: DOMString,
+            output: &Node) {
+        let window = window_from_node(context_node);
+        let context_document = document_from_node(context_node);
+        let url = context_document.url();
+
+        // Step 1.
+        let loader = DocumentLoader::new(&*context_document.loader());
+        let document = Document::new(&window, None, Some(url.clone()),
+                                     IsHTMLDocument::HTMLDocument,
+                                     None, None,
+                                     DocumentSource::FromParser,
+                                     loader,
+                                     None, None);
+
+        // Step 2.
+        document.set_quirks_mode(context_document.quirks_mode());
+
+        // Step 11.
+        let form = context_node.inclusive_ancestors()
+                               .find(|element| element.is::<HTMLFormElement>());
+        let fragment_context = FragmentContext {
+            context_elem: context_node,
+            form_elem: form.r(),
+        };
+
+        let parser = ServoParser::new(
+            &document,
+            None,
+            Tokenizer::Html(
+                self::html::Tokenizer::new(&document, url.clone(), Some(fragment_context))),
+            LastChunkState::Received);
+        parser.parse_chunk(String::from(input));
+
+        // Step 14.
+        let root_element = document.GetDocumentElement().expect("no document element");
+        for child in root_element.upcast::<Node>().children() {
+            output.AppendChild(&child).unwrap();
+        }
+    }
+
+    pub fn parse_xml_document(
+            document: &Document,
+            input: DOMString,
+            url: ServoUrl,
+            owner: Option<PipelineId>) {
+        let parser = ServoParser::new(
+            document,
+            owner,
+            Tokenizer::Xml(self::xml::Tokenizer::new(document, url)),
+            LastChunkState::NotReceived);
+        parser.parse_chunk(String::from(input));
+    }
+
     #[allow(unrooted_must_root)]
     fn new_inherited(
             document: &Document,
@@ -80,7 +145,7 @@ impl ServoParser {
             reflector: Reflector::new(),
             document: JS::from_ref(document),
             pipeline: pipeline,
-            pending_input: DOMRefCell::new(VecDeque::new()),
+            pending_input: DOMRefCell::new(BufferQueue::new()),
             tokenizer: DOMRefCell::new(tokenizer),
             last_chunk_received: Cell::new(last_chunk_state == LastChunkState::Received),
             suspended: Default::default(),
@@ -113,16 +178,7 @@ impl ServoParser {
     }
 
     fn push_input_chunk(&self, chunk: String) {
-        self.pending_input.borrow_mut().push_back(chunk);
-    }
-
-    fn take_next_input_chunk(&self) -> Option<String> {
-        let mut pending_input = self.pending_input.borrow_mut();
-        if pending_input.is_empty() {
-            None
-        } else {
-            pending_input.pop_front()
-        }
+        self.pending_input.borrow_mut().push_back(chunk.into());
     }
 
     fn last_chunk_received(&self) -> bool {
@@ -170,10 +226,10 @@ impl ServoParser {
         // the parser remains unsuspended.
         loop {
             self.document().reflow_if_reflow_timer_expired();
-            if let Some(chunk) = self.take_next_input_chunk() {
-                self.tokenizer.borrow_mut().feed(chunk);
-            } else {
-                self.tokenizer.borrow_mut().run();
+            if let Err(script) = self.tokenizer.borrow_mut().feed(&mut *self.pending_input.borrow_mut()) {
+                if script.prepare() {
+                    continue;
+                }
             }
 
             // Document parsing is blocked on an external resource.
@@ -214,127 +270,39 @@ impl ServoParser {
     }
 }
 
-#[derive(HeapSizeOf)]
+#[derive(HeapSizeOf, JSTraceable)]
 #[must_root]
 enum Tokenizer {
-    HTML(HtmlTokenizer),
-    XML(
-        #[ignore_heap_size_of = "Defined in xml5ever"]
-        XmlTokenizer<XmlTreeBuilder<JS<Node>, Sink>>
-    ),
-}
-
-#[derive(HeapSizeOf)]
-#[must_root]
-struct HtmlTokenizer {
-    #[ignore_heap_size_of = "Defined in html5ever"]
-    inner: H5ETokenizer<HtmlTreeBuilder<JS<Node>, Sink>>,
-    #[ignore_heap_size_of = "Defined in html5ever"]
-    input_buffer: BufferQueue,
-}
-
-impl HtmlTokenizer {
-    #[allow(unrooted_must_root)]
-    fn new(inner: H5ETokenizer<HtmlTreeBuilder<JS<Node>, Sink>>) -> Self {
-        HtmlTokenizer {
-            inner: inner,
-            input_buffer: BufferQueue::new(),
-        }
-    }
-
-    fn feed(&mut self, input: String) {
-        self.input_buffer.push_back(input.into());
-        self.run();
-    }
-
-    fn run(&mut self) {
-        self.inner.feed(&mut self.input_buffer);
-    }
-
-    fn end(&mut self) {
-        assert!(self.input_buffer.is_empty());
-        self.inner.end();
-    }
-
-    fn set_plaintext_state(&mut self) {
-        self.inner.set_plaintext_state();
-    }
-}
-
-#[derive(JSTraceable, HeapSizeOf)]
-#[must_root]
-struct Sink {
-    pub base_url: Url,
-    pub document: JS<Document>,
+    Html(self::html::Tokenizer),
+    Xml(self::xml::Tokenizer),
 }
 
 impl Tokenizer {
-    fn feed(&mut self, input: String) {
+    fn feed(&mut self, input: &mut BufferQueue) -> Result<(), Root<HTMLScriptElement>> {
         match *self {
-            Tokenizer::HTML(ref mut tokenizer) => tokenizer.feed(input),
-            Tokenizer::XML(ref mut tokenizer) => tokenizer.feed(input.into()),
-        }
-    }
-
-    fn run(&mut self) {
-        match *self {
-            Tokenizer::HTML(ref mut tokenizer) => tokenizer.run(),
-            Tokenizer::XML(ref mut tokenizer) => tokenizer.run(),
+            Tokenizer::Html(ref mut tokenizer) => tokenizer.feed(input),
+            Tokenizer::Xml(ref mut tokenizer) => tokenizer.feed(input),
         }
     }
 
     fn end(&mut self) {
         match *self {
-            Tokenizer::HTML(ref mut tokenizer) => tokenizer.end(),
-            Tokenizer::XML(ref mut tokenizer) => tokenizer.end(),
+            Tokenizer::Html(ref mut tokenizer) => tokenizer.end(),
+            Tokenizer::Xml(ref mut tokenizer) => tokenizer.end(),
         }
     }
 
     fn set_plaintext_state(&mut self) {
         match *self {
-            Tokenizer::HTML(ref mut tokenizer) => tokenizer.set_plaintext_state(),
-            Tokenizer::XML(_) => { /* todo */ },
+            Tokenizer::Html(ref mut tokenizer) => tokenizer.set_plaintext_state(),
+            Tokenizer::Xml(_) => unimplemented!(),
         }
     }
 
     fn profiler_category(&self) -> ProfilerCategory {
         match *self {
-            Tokenizer::HTML(_) => ProfilerCategory::ScriptParseHTML,
-            Tokenizer::XML(_) => ProfilerCategory::ScriptParseXML,
-        }
-    }
-}
-
-impl JSTraceable for Tokenizer {
-    fn trace(&self, trc: *mut JSTracer) {
-        struct Tracer(*mut JSTracer);
-        let tracer = Tracer(trc);
-
-        match *self {
-            Tokenizer::HTML(ref tokenizer) => {
-                impl HtmlTracer for Tracer {
-                    type Handle = JS<Node>;
-                    #[allow(unrooted_must_root)]
-                    fn trace_handle(&self, node: &JS<Node>) {
-                        node.trace(self.0);
-                    }
-                }
-                let tree_builder = tokenizer.inner.sink();
-                tree_builder.trace_handles(&tracer);
-                tree_builder.sink().trace(trc);
-            },
-            Tokenizer::XML(ref tokenizer) => {
-                impl XmlTracer for Tracer {
-                    type Handle = JS<Node>;
-                    #[allow(unrooted_must_root)]
-                    fn trace_handle(&self, node: JS<Node>) {
-                        node.trace(self.0);
-                    }
-                }
-                let tree_builder = tokenizer.sink();
-                tree_builder.trace_handles(&tracer);
-                tree_builder.sink().trace(trc);
-            }
+            Tokenizer::Html(_) => ProfilerCategory::ScriptParseHTML,
+            Tokenizer::Xml(_) => ProfilerCategory::ScriptParseXML,
         }
     }
 }
@@ -349,11 +317,11 @@ pub struct ParserContext {
     /// The pipeline associated with this document.
     id: PipelineId,
     /// The URL for this document.
-    url: Url,
+    url: ServoUrl,
 }
 
 impl ParserContext {
-    pub fn new(id: PipelineId, url: Url) -> ParserContext {
+    pub fn new(id: PipelineId, url: ServoUrl) -> ParserContext {
         ParserContext {
             parser: None,
             is_synthesized_document: false,
@@ -492,3 +460,8 @@ impl FetchResponseListener for ParserContext {
 }
 
 impl PreInvoke for ParserContext {}
+
+pub struct FragmentContext<'a> {
+    pub context_elem: &'a Node,
+    pub form_elem: Option<&'a Node>,
+}

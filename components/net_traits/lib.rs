@@ -9,6 +9,7 @@
 
 #![deny(unsafe_code)]
 
+extern crate bluetooth_traits;
 extern crate cookie as cookie_rs;
 extern crate heapsize;
 #[macro_use] extern crate heapsize_derive;
@@ -26,12 +27,14 @@ extern crate num_traits;
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;
+extern crate servo_url;
 extern crate url;
 extern crate util;
 extern crate uuid;
 extern crate webrender_traits;
 extern crate websocket;
 
+use bluetooth_traits::{BluetoothResponseListener, BluetoothResponseResult};
 use cookie_rs::Cookie;
 use filemanager_thread::FileManagerThreadMsg;
 use heapsize::HeapSizeOf;
@@ -42,17 +45,15 @@ use hyper::mime::{Attr, Mime};
 use hyper_serde::Serde;
 use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
 use ipc_channel::router::ROUTER;
-use msg::constellation_msg::{PipelineId, ReferrerPolicy};
+use msg::constellation_msg::PipelineId;
 use request::{Request, RequestInit};
 use response::{HttpsState, Response};
+use servo_url::ServoUrl;
 use std::io::Error as IOError;
 use storage_thread::StorageThreadMsg;
-use url::Url;
 use websocket::header;
 
 pub mod blob_url_store;
-pub mod bluetooth_scanfilter;
-pub mod bluetooth_thread;
 pub mod filemanager_thread;
 pub mod hosts;
 pub mod image_cache_thread;
@@ -108,12 +109,34 @@ impl CustomResponse {
 #[derive(Clone, Deserialize, Serialize)]
 pub struct CustomResponseMediator {
     pub response_chan: IpcSender<Option<CustomResponse>>,
-    pub load_url: Url
+    pub load_url: ServoUrl,
+}
+
+/// [Policies](https://w3c.github.io/webappsec-referrer-policy/#referrer-policy-states)
+/// for providing a referrer header for a request
+#[derive(Clone, Copy, Debug, Deserialize, HeapSizeOf, Serialize)]
+pub enum ReferrerPolicy {
+    /// "no-referrer"
+    NoReferrer,
+    /// "no-referrer-when-downgrade"
+    NoReferrerWhenDowngrade,
+    /// "origin"
+    Origin,
+    /// "same-origin"
+    SameOrigin,
+    /// "origin-when-cross-origin"
+    OriginWhenCrossOrigin,
+    /// "unsafe-url"
+    UnsafeUrl,
+    /// "strict-origin"
+    StrictOrigin,
+    /// "strict-origin-when-cross-origin"
+    StrictOriginWhenCrossOrigin,
 }
 
 #[derive(Clone, Deserialize, Serialize, HeapSizeOf)]
 pub struct LoadData {
-    pub url: Url,
+    pub url: ServoUrl,
     #[ignore_heap_size_of = "Defined in hyper"]
     #[serde(deserialize_with = "::hyper_serde::deserialize",
             serialize_with = "::hyper_serde::serialize")]
@@ -130,19 +153,19 @@ pub struct LoadData {
     /// Unused in fetch
     pub preserved_headers: Headers,
     pub data: Option<Vec<u8>>,
-    pub cors: Option<ResourceCORSData>,
+    pub cors: Option<ResourceCorsData>,
     pub pipeline_id: Option<PipelineId>,
     // https://fetch.spec.whatwg.org/#concept-http-fetch step 4.3
     pub credentials_flag: bool,
     pub context: LoadContext,
     /// The policy and referring URL for the originator of this request
     pub referrer_policy: Option<ReferrerPolicy>,
-    pub referrer_url: Option<Url>
+    pub referrer_url: Option<ServoUrl>
 }
 
 impl LoadData {
     pub fn new(context: LoadContext,
-               url: Url,
+               url: ServoUrl,
                load_origin: &LoadOrigin) -> LoadData {
         LoadData {
             url: url,
@@ -161,7 +184,7 @@ impl LoadData {
 }
 
 pub trait LoadOrigin {
-    fn referrer_url(&self) -> Option<Url>;
+    fn referrer_url(&self) -> Option<ServoUrl>;
     fn referrer_policy(&self) -> Option<ReferrerPolicy>;
     fn pipeline_id(&self) -> Option<PipelineId>;
 }
@@ -271,6 +294,13 @@ impl<T: FetchResponseListener> Action<T> for FetchResponseMsg {
     }
 }
 
+impl<T: BluetoothResponseListener> Action<T> for BluetoothResponseResult {
+    /// Execute the default action on a provided listener.
+    fn process(self, listener: &mut T) {
+        listener.response(self)
+    }
+}
+
 /// A wrapper for a network load that can either be channel or event-based.
 #[derive(Deserialize, Serialize)]
 pub enum LoadConsumer {
@@ -377,7 +407,7 @@ pub struct WebSocketCommunicate {
 
 #[derive(Deserialize, Serialize)]
 pub struct WebSocketConnectData {
-    pub resource_url: Url,
+    pub resource_url: ServoUrl,
     pub origin: String,
     pub protocols: Vec<String>,
 }
@@ -390,19 +420,19 @@ pub enum CoreResourceMsg {
     /// Try to make a websocket connection to a URL.
     WebsocketConnect(WebSocketCommunicate, WebSocketConnectData),
     /// Store a set of cookies for a given originating URL
-    SetCookiesForUrl(Url, String, CookieSource),
+    SetCookiesForUrl(ServoUrl, String, CookieSource),
     /// Store a set of cookies for a given originating URL
     SetCookiesForUrlWithData(
-        Url,
+        ServoUrl,
         #[serde(deserialize_with = "::hyper_serde::deserialize",
                 serialize_with = "::hyper_serde::serialize")]
         Cookie,
         CookieSource
     ),
     /// Retrieve the stored cookies for a given URL
-    GetCookiesForUrl(Url, IpcSender<Option<String>>, CookieSource),
+    GetCookiesForUrl(ServoUrl, IpcSender<Option<String>>, CookieSource),
     /// Get a cookie by name for a given originating URL
-    GetCookiesDataForUrl(Url, IpcSender<Vec<Serde<Cookie>>>, CookieSource),
+    GetCookiesDataForUrl(ServoUrl, IpcSender<Vec<Serde<Cookie>>>, CookieSource),
     /// Cancel a network request corresponding to a given `ResourceId`
     Cancel(ResourceId),
     /// Synchronization message solely for knowing the state of the ResourceChannelManager loop
@@ -443,18 +473,18 @@ pub struct LoadResponse {
 }
 
 #[derive(Clone, Deserialize, Serialize, HeapSizeOf)]
-pub struct ResourceCORSData {
+pub struct ResourceCorsData {
     /// CORS Preflight flag
     pub preflight: bool,
     /// Origin of CORS Request
-    pub origin: Url,
+    pub origin: ServoUrl,
 }
 
 /// Metadata about a loaded resource, such as is obtained from HTTP headers.
 #[derive(Clone, Deserialize, Serialize, HeapSizeOf)]
 pub struct Metadata {
     /// Final URL after redirects.
-    pub final_url: Url,
+    pub final_url: ServoUrl,
 
     #[ignore_heap_size_of = "Defined in hyper"]
     /// MIME type / subtype.
@@ -474,12 +504,12 @@ pub struct Metadata {
     pub https_state: HttpsState,
 
     /// Referrer Url
-    pub referrer: Option<Url>,
+    pub referrer: Option<ServoUrl>,
 }
 
 impl Metadata {
     /// Metadata with defaults for everything optional.
-    pub fn default(url: Url) -> Self {
+    pub fn default(url: ServoUrl) -> Self {
         Metadata {
             final_url:    url,
             content_type: None,
@@ -585,7 +615,7 @@ pub enum NetworkError {
     Internal(String),
     LoadCancelled,
     /// SSL validation error that has to be handled in the HTML parser
-    SslValidation(Url, String),
+    SslValidation(ServoUrl, String),
 }
 
 /// Normalize `slice`, as defined by

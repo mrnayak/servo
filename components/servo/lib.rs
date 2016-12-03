@@ -24,6 +24,8 @@ extern crate gaol;
 extern crate gleam;
 extern crate log;
 
+pub extern crate bluetooth;
+pub extern crate bluetooth_traits;
 pub extern crate canvas;
 pub extern crate canvas_traits;
 pub extern crate compositing;
@@ -43,6 +45,7 @@ pub extern crate profile_traits;
 pub extern crate script;
 pub extern crate script_traits;
 pub extern crate script_layout_interface;
+pub extern crate servo_url;
 pub extern crate style;
 pub extern crate url;
 pub extern crate util;
@@ -61,6 +64,8 @@ fn webdriver(port: u16, constellation: Sender<ConstellationMsg>) {
 #[cfg(not(feature = "webdriver"))]
 fn webdriver(_port: u16, _constellation: Sender<ConstellationMsg>) { }
 
+use bluetooth::BluetoothThreadFactory;
+use bluetooth_traits::BluetoothRequest;
 use compositing::{CompositorProxy, IOCompositor};
 use compositing::compositor_thread::InitialCompositorState;
 use compositing::windowing::WindowEvent;
@@ -75,17 +80,18 @@ use gaol::sandbox::{ChildSandbox, ChildSandboxMethods};
 use gfx::font_cache_thread::FontCacheThread;
 use ipc_channel::ipc::{self, IpcSender};
 use log::{Log, LogMetadata, LogRecord};
-use net::bluetooth_thread::BluetoothThreadFactory;
 use net::image_cache_thread::new_image_cache_thread;
 use net::resource_thread::new_resource_threads;
 use net_traits::IpcSend;
-use net_traits::bluetooth_thread::BluetoothMethodMsg;
 use profile::mem as profile_mem;
 use profile::time as profile_time;
 use profile_traits::mem;
 use profile_traits::time;
 use script_traits::{ConstellationMsg, SWManagerSenders, ScriptMsg};
+use servo_url::ServoUrl;
+use std::borrow::Cow;
 use std::cmp::max;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
 use util::opts;
@@ -126,9 +132,9 @@ impl<Window> Browser<Window> where Window: WindowMethods + 'static {
         let time_profiler_chan = profile_time::Profiler::create(&opts.time_profiling,
                                                                 opts.time_profiler_trace_path.clone());
         let mem_profiler_chan = profile_mem::Profiler::create(opts.mem_profiler_period);
-        if let Some(port) = opts.debugger_port {
+        let debugger_chan = opts.debugger_port.map(|port| {
             debugger::start_server(port)
-        }
+        });
         let devtools_chan = opts.devtools_port.map(|port| {
             devtools::start_server(port)
         });
@@ -160,26 +166,34 @@ impl<Window> Browser<Window> where Window: WindowMethods + 'static {
                 enable_msaa: opts.use_msaa,
                 enable_profiler: opts.webrender_stats,
                 debug: opts.webrender_debug,
-                enable_recording: false,
+                enable_recording: opts.webrender_record,
                 precache_shaders: opts.precache_shaders,
                 enable_scrollbars: opts.output_file.is_none(),
                 renderer_kind: renderer_kind,
+                enable_subpixel_aa: opts.enable_subpixel_text_antialiasing,
             })
         };
+
+        // Important that this call is done in a single-threaded fashion, we
+        // can't defer it after `create_constellation` has started.
+        script::init();
 
         // Create the constellation, which maintains the engine
         // pipelines, including the script and layout threads, as well
         // as the navigation context.
-        let (constellation_chan, sw_senders) = create_constellation(opts.clone(),
+        let (constellation_chan, sw_senders) = create_constellation(opts.user_agent.clone(),
+                                                                    opts.config_dir.clone(),
+                                                                    opts.url.clone(),
                                                                     compositor_proxy.clone_compositor_proxy(),
                                                                     time_profiler_chan.clone(),
                                                                     mem_profiler_chan.clone(),
+                                                                    debugger_chan,
                                                                     devtools_chan,
                                                                     supports_clipboard,
                                                                     webrender_api_sender.clone());
 
         // Send the constellation's swmanager sender to service worker manager thread
-        script::init(sw_senders);
+        script::init_service_workers(sw_senders);
 
         if cfg!(feature = "webdriver") {
             if let Some(port) = opts.webdriver_port {
@@ -234,21 +248,24 @@ impl<Window> Browser<Window> where Window: WindowMethods + 'static {
     }
 }
 
-fn create_constellation(opts: opts::Opts,
+fn create_constellation(user_agent: Cow<'static, str>,
+                        config_dir: Option<PathBuf>,
+                        url: Option<ServoUrl>,
                         compositor_proxy: Box<CompositorProxy + Send>,
                         time_profiler_chan: time::ProfilerChan,
                         mem_profiler_chan: mem::ProfilerChan,
+                        debugger_chan: Option<debugger::Sender>,
                         devtools_chan: Option<Sender<devtools_traits::DevtoolsControlMsg>>,
                         supports_clipboard: bool,
                         webrender_api_sender: webrender_traits::RenderApiSender)
                         -> (Sender<ConstellationMsg>, SWManagerSenders) {
-    let bluetooth_thread: IpcSender<BluetoothMethodMsg> = BluetoothThreadFactory::new();
+    let bluetooth_thread: IpcSender<BluetoothRequest> = BluetoothThreadFactory::new();
 
     let (public_resource_threads, private_resource_threads) =
-        new_resource_threads(opts.user_agent,
+        new_resource_threads(user_agent,
                              devtools_chan.clone(),
                              time_profiler_chan.clone(),
-                             opts.config_dir.map(Into::into));
+                             config_dir);
     let image_cache_thread = new_image_cache_thread(public_resource_threads.sender(),
                                                     webrender_api_sender.create_api());
     let font_cache_thread = FontCacheThread::new(public_resource_threads.sender(),
@@ -258,6 +275,7 @@ fn create_constellation(opts: opts::Opts,
 
     let initial_state = InitialConstellationState {
         compositor_proxy: compositor_proxy,
+        debugger_chan: debugger_chan,
         devtools_chan: devtools_chan,
         bluetooth_thread: bluetooth_thread,
         image_cache_thread: image_cache_thread,
@@ -274,7 +292,7 @@ fn create_constellation(opts: opts::Opts,
                         layout_thread::LayoutThread,
                         script::script_thread::ScriptThread>::start(initial_state);
 
-    if let Some(url) = opts.url {
+    if let Some(url) = url {
         constellation_chan.send(ConstellationMsg::InitLoadUrl(url)).unwrap();
     };
 
@@ -333,7 +351,8 @@ pub fn run_content_process(token: String) {
 
     // send the required channels to the service worker manager
     let sw_senders = unprivileged_content.swmanager_senders();
-    script::init(sw_senders);
+    script::init();
+    script::init_service_workers(sw_senders);
 
     unprivileged_content.start_all::<script_layout_interface::message::Msg,
                                      layout_thread::LayoutThread,

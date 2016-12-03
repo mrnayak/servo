@@ -12,7 +12,8 @@ extern crate euclid;
 extern crate libc;
 #[macro_use] extern crate log;
 extern crate parking_lot;
-extern crate url;
+extern crate servo_url;
+extern crate style_traits;
 
 #[allow(non_snake_case)]
 pub mod glue;

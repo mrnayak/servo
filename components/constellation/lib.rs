@@ -11,9 +11,11 @@
 #![deny(unsafe_code)]
 
 extern crate backtrace;
+extern crate bluetooth_traits;
 extern crate canvas;
 extern crate canvas_traits;
 extern crate compositing;
+extern crate debugger;
 extern crate devtools_traits;
 extern crate euclid;
 #[cfg(not(target_os = "windows"))]
@@ -34,8 +36,8 @@ extern crate script_traits;
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;
+extern crate servo_url;
 extern crate style_traits;
-extern crate url;
 #[macro_use]
 extern crate util;
 extern crate webrender_traits;

@@ -73,7 +73,7 @@ use html5ever_atoms::{Prefix, LocalName, Namespace, QualName};
 use parking_lot::RwLock;
 use selectors::matching::{ElementFlags, MatchingReason, matches};
 use selectors::matching::{HAS_EDGE_CHILD_SELECTOR, HAS_SLOW_SELECTOR, HAS_SLOW_SELECTOR_LATER_SIBLINGS};
-use selectors::parser::{AttrSelector, NamespaceConstraint, parse_author_origin_selector_list_from_str};
+use selectors::parser::{AttrSelector, NamespaceConstraint};
 use servo_atoms::Atom;
 use std::ascii::AsciiExt;
 use std::borrow::Cow;
@@ -84,15 +84,17 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use style::attr::{AttrValue, LengthOrPercentageOrAuto};
+use style::dom::TRestyleDamage;
 use style::element_state::*;
 use style::matching::{common_style_affecting_attributes, rare_style_affecting_attributes};
 use style::parser::ParserContextExtraData;
 use style::properties::{DeclaredValue, Importance};
 use style::properties::{PropertyDeclaration, PropertyDeclarationBlock, parse_style_attribute};
 use style::properties::longhands::{background_image, border_spacing, font_family, font_size, overflow_x};
-use style::selector_impl::{NonTSPseudoClass, ServoSelectorImpl};
-use style::selector_matching::ApplicableDeclarationBlock;
+use style::restyle_hints::RESTYLE_SELF;
+use style::selector_parser::{NonTSPseudoClass, RestyleDamage, SelectorImpl, SelectorParser};
 use style::sink::Push;
+use style::stylist::ApplicableDeclarationBlock;
 use style::values::CSSFloat;
 use style::values::specified::{self, CSSColor, CSSRGBA, LengthOrPercentage};
 
@@ -199,6 +201,19 @@ impl Element {
             box Element::new_inherited(local_name, namespace, prefix, document),
             document,
             ElementBinding::Wrap)
+    }
+
+    pub fn restyle(&self, damage: NodeDamage) {
+        let doc = self.node.owner_doc();
+        let mut restyle = doc.ensure_pending_restyle(self);
+
+        // FIXME(bholley): I think we should probably only do this for
+        // NodeStyleDamaged, but I'm preserving existing behavior.
+        restyle.hint |= RESTYLE_SELF;
+
+        if damage == NodeDamage::OtherNodeDamage {
+            restyle.damage = RestyleDamage::rebuild_and_reflow();
+        }
     }
 
     // https://drafts.csswg.org/cssom-view/#css-layout-box
@@ -328,10 +343,10 @@ impl LayoutElementHelpers for LayoutJS<Element> {
         where V: Push<ApplicableDeclarationBlock>
     {
         #[inline]
-        fn from_declaration(rule: PropertyDeclaration) -> ApplicableDeclarationBlock {
+        fn from_declaration(declaration: PropertyDeclaration) -> ApplicableDeclarationBlock {
             ApplicableDeclarationBlock::from_declarations(
                 Arc::new(RwLock::new(PropertyDeclarationBlock {
-                    declarations: vec![(rule, Importance::Normal)],
+                    declarations: vec![(declaration, Importance::Normal)],
                     important_count: 0,
                 })),
                 Importance::Normal)
@@ -368,7 +383,7 @@ impl LayoutElementHelpers for LayoutJS<Element> {
                 PropertyDeclaration::BackgroundImage(DeclaredValue::Value(
                     background_image::SpecifiedValue(vec![
                         background_image::single_value::SpecifiedValue(Some(
-                            specified::Image::Url(url, specified::UrlExtraData { })
+                            specified::Image::for_cascade(Some(url.into()), specified::url::UrlExtraData { })
                         ))
                     ])))));
         }
@@ -814,10 +829,7 @@ impl Element {
         }
         None
     }
-}
 
-
-impl Element {
     pub fn is_focusable_area(&self) -> bool {
         if self.is_actually_disabled() {
             return false;
@@ -856,10 +868,7 @@ impl Element {
             _ => false,
         }
     }
-}
 
-
-impl Element {
     pub fn push_new_attribute(&self,
                               local_name: LocalName,
                               value: AttrValue,
@@ -1441,7 +1450,7 @@ impl ElementMethods for Element {
     // https://dom.spec.whatwg.org/#dom-element-getelementsbytagname
     fn GetElementsByTagName(&self, localname: DOMString) -> Root<HTMLCollection> {
         let window = window_from_node(self);
-        HTMLCollection::by_tag_name(&window, self.upcast(), localname)
+        HTMLCollection::by_qualified_name(&window, self.upcast(), LocalName::from(&*localname))
     }
 
     // https://dom.spec.whatwg.org/#dom-element-getelementsbytagnamens
@@ -1876,10 +1885,10 @@ impl ElementMethods for Element {
 
     // https://dom.spec.whatwg.org/#dom-element-matches
     fn Matches(&self, selectors: DOMString) -> Fallible<bool> {
-        match parse_author_origin_selector_list_from_str(&selectors) {
+        match SelectorParser::parse_author_origin_no_namespace(&selectors) {
             Err(()) => Err(Error::Syntax),
-            Ok(ref selectors) => {
-                Ok(matches(selectors, &Root::from_ref(self), None, MatchingReason::Other))
+            Ok(selectors) => {
+                Ok(matches(&selectors.0, &Root::from_ref(self), None, MatchingReason::Other))
             }
         }
     }
@@ -1891,13 +1900,13 @@ impl ElementMethods for Element {
 
     // https://dom.spec.whatwg.org/#dom-element-closest
     fn Closest(&self, selectors: DOMString) -> Fallible<Option<Root<Element>>> {
-        match parse_author_origin_selector_list_from_str(&selectors) {
+        match SelectorParser::parse_author_origin_no_namespace(&selectors) {
             Err(()) => Err(Error::Syntax),
-            Ok(ref selectors) => {
+            Ok(selectors) => {
                 let root = self.upcast::<Node>();
                 for element in root.inclusive_ancestors() {
                     if let Some(element) = Root::downcast::<Element>(element) {
-                        if matches(selectors, &element, None, MatchingReason::Other) {
+                        if matches(&selectors.0, &element, None, MatchingReason::Other) {
                             return Ok(Some(element));
                         }
                     }
@@ -2132,9 +2141,9 @@ impl VirtualMethods for Element {
 }
 
 impl<'a> ::selectors::MatchAttrGeneric for Root<Element> {
-    type Impl = ServoSelectorImpl;
+    type Impl = SelectorImpl;
 
-    fn match_attr<F>(&self, attr: &AttrSelector<ServoSelectorImpl>, test: F) -> bool
+    fn match_attr<F>(&self, attr: &AttrSelector<SelectorImpl>, test: F) -> bool
         where F: Fn(&str) -> bool
     {
         use ::selectors::Element;

@@ -22,9 +22,9 @@ from mach.decorators import (
 from servo.command_base import CommandBase, cd, call
 
 CARGO_PATHS = [
-    path.join('components', 'servo'),
     path.join('ports', 'cef'),
     path.join('ports', 'geckolib'),
+    path.join('ports', 'servo'),
 ]
 
 
@@ -105,7 +105,7 @@ class MachCommands(CommandBase):
         '--json', '-j', action="store_true",
         help='Outputs')
     def clippy(self, package=None, json=False):
-        params = ["--features=script/plugins/clippy"]
+        params = ["--features=clippy"]
         if package:
             params += ["-p", package]
         if json:

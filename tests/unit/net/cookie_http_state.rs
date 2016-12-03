@@ -6,12 +6,12 @@ use hyper::header::{Header, SetCookie};
 use net::cookie::Cookie;
 use net::cookie_storage::CookieStorage;
 use net_traits::CookieSource;
-use url::Url;
+use servo_url::ServoUrl;
 
 
 fn run(set_location: &str, set_cookies: &[&str], final_location: &str) -> String {
     let mut storage = CookieStorage::new();
-    let url = Url::parse(set_location).unwrap();
+    let url = ServoUrl::parse(set_location).unwrap();
     let source = CookieSource::HTTP;
 
     // Add all cookies to the store
@@ -28,7 +28,7 @@ fn run(set_location: &str, set_cookies: &[&str], final_location: &str) -> String
     }
 
     // Get cookies for the test location
-    let url = Url::parse(final_location).unwrap();
+    let url = ServoUrl::parse(final_location).unwrap();
     storage.cookies_for_url(&url, source).unwrap_or("".to_string())
 }
 
@@ -49,6 +49,7 @@ fn test_0002() {
     let r = run("http://home.example.org:8888/cookie-parser?0002",
                 &["foo=bar; Expires=Fri, 07 Aug 2019 08:04:19 GMT"],
                 "http://home.example.org:8888/cookie-parser-result?0002");
+    println!("{:?}", &r);
     assert_eq!(&r, "foo=bar");
 }
 
@@ -67,6 +68,7 @@ fn test_0004() {
     let r = run("http://home.example.org:8888/cookie-parser?0004",
                 &["foo"],
                 "http://home.example.org:8888/cookie-parser-result?0004");
+    println!("{:?}", &r);
     assert_eq!(&r, "");
 }
 
@@ -75,6 +77,7 @@ fn test_0005() {
     let r = run("http://home.example.org:8888/cookie-parser?0005",
                 &["foo=bar; max-age=10000;"],
                 "http://home.example.org:8888/cookie-parser-result?0005");
+    println!("{:?}", &r);
     assert_eq!(&r, "foo=bar");
 }
 
@@ -84,6 +87,7 @@ fn test_0006() {
     let r = run("http://home.example.org:8888/cookie-parser?0006",
                 &["foo=bar; max-age=0;"],
                 "http://home.example.org:8888/cookie-parser-result?0006");
+    println!("{:?}", &r);
     assert_eq!(&r, "");
 }
 
@@ -97,9 +101,9 @@ fn test_0007() {
 
 #[test]
 fn test_0008() {
-    let r = run("http://home.example.org:8888/cookie-parser?0008",
-                &["foo=bar; version=1000;"],
-                "http://home.example.org:8888/cookie-parser-result?0008");
+   let r = run("http://home.example.org:8888/cookie-parser?0007",
+                &["foo=bar; version=1;"],
+                "http://home.example.org:8888/cookie-parser-result?0007");
     assert_eq!(&r, "foo=bar");
 }
 

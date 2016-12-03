@@ -16,9 +16,9 @@ extern crate bitflags;
 extern crate brotli;
 extern crate content_blocker as content_blocker_parser;
 extern crate cookie as cookie_rs;
-extern crate device;
 extern crate devtools_traits;
 extern crate flate2;
+extern crate fnv;
 extern crate hyper;
 extern crate hyper_serde;
 extern crate immeta;
@@ -34,10 +34,10 @@ extern crate net_traits;
 extern crate openssl;
 extern crate openssl_verify;
 extern crate profile_traits;
-extern crate rand;
 extern crate rustc_serialize;
 #[macro_use]
 extern crate serde_derive;
+extern crate servo_url;
 extern crate threadpool;
 extern crate time;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -49,27 +49,33 @@ extern crate uuid;
 extern crate webrender_traits;
 extern crate websocket;
 
-pub mod about_loader;
-pub mod blob_loader;
-pub mod bluetooth_thread;
-pub mod chrome_loader;
-pub mod connector;
-pub mod content_blocker;
+mod about_loader;
+mod blob_loader;
+mod chrome_loader;
+mod connector;
+mod content_blocker;
 pub mod cookie;
 pub mod cookie_storage;
 mod data_loader;
-pub mod file_loader;
+mod file_loader;
 pub mod filemanager_thread;
 pub mod hsts;
-pub mod http_loader;
+mod http_loader;
 pub mod image_cache_thread;
 pub mod mime_classifier;
 pub mod resource_thread;
-pub mod storage_thread;
-pub mod websocket_loader;
+mod storage_thread;
+mod websocket_loader;
 
 /// An implementation of the [Fetch specification](https://fetch.spec.whatwg.org/)
 pub mod fetch {
     pub mod cors_cache;
     pub mod methods;
+}
+
+/// A module for re-exports of items used in unit tests.
+pub mod test {
+    pub use chrome_loader::resolve_chrome_url;
+    pub use http_loader::{HttpRequest, HttpRequestFactory, HttpResponse, HttpState};
+    pub use http_loader::{LoadError, LoadErrorType, UIProvider, load};
 }

@@ -24,6 +24,10 @@ bitflags! {
 
 macro_rules! thread_types ( ( $( $fun:ident = $flag:ident ; )* ) => (
     impl ThreadState {
+        pub fn is_worker(self) -> bool {
+            self.contains(IN_WORKER)
+        }
+
         $(
             #[cfg(debug_assertions)]
             pub fn $fun(self) -> bool {
@@ -68,7 +72,8 @@ mod imp {
     pub fn get() -> ThreadState {
         let state = STATE.with(|ref k| {
             match *k.borrow() {
-                None => panic!("Thread state not initialized"),
+                // This is one of the layout threads, that use rayon.
+                None => super::LAYOUT | super::IN_WORKER,
                 Some(s) => s,
             }
         });

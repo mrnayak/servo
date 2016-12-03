@@ -12,12 +12,11 @@ use euclid::point::Point2D;
 use keyframes::{KeyframesStep, KeyframesStepValue};
 use properties::{self, CascadeFlags, ComputedValues, Importance};
 use properties::animated_properties::{AnimatedProperty, TransitionProperty};
-use properties::longhands::animation_direction::computed_value::AnimationDirection;
+use properties::longhands::animation_direction::computed_value::single_value::T as AnimationDirection;
 use properties::longhands::animation_iteration_count::computed_value::AnimationIterationCount;
-use properties::longhands::animation_play_state::computed_value::AnimationPlayState;
+use properties::longhands::animation_play_state::computed_value::single_value::T as AnimationPlayState;
 use properties::longhands::transition_timing_function::computed_value::StartEnd;
 use properties::longhands::transition_timing_function::computed_value::TransitionTimingFunction;
-use selector_matching::ApplicableDeclarationBlock;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use timer::Timer;
@@ -385,23 +384,27 @@ fn compute_style_for_animation_step(context: &SharedStyleContext,
                                     style_from_cascade: &ComputedValues)
                                     -> ComputedValues {
     match step.value {
-        // TODO: avoiding this spurious clone might involve having to create
-        // an Arc in the below (more common case).
         KeyframesStepValue::ComputedValues => style_from_cascade.clone(),
         KeyframesStepValue::Declarations { block: ref declarations } => {
-            let declaration_block = ApplicableDeclarationBlock {
-                mixed_declarations: declarations.clone(),
-                importance: Importance::Normal,
-                source_order: 0,
-                specificity: ::std::u32::MAX,
+            let guard = declarations.read();
+
+            // No !important in keyframes.
+            debug_assert!(guard.declarations.iter()
+                            .all(|&(_, importance)| importance == Importance::Normal));
+
+            let iter = || {
+                guard.declarations.iter().rev().map(|&(ref decl, _importance)| decl)
             };
-            let (computed, _) = properties::cascade(context.viewport_size,
-                                                    &[declaration_block],
-                                                    Some(previous_style),
-                                                    None,
-                                                    None,
-                                                    context.error_reporter.clone(),
-                                                    CascadeFlags::empty());
+
+            let computed =
+                properties::apply_declarations(context.viewport_size,
+                                               /* is_root = */ false,
+                                               iter,
+                                               previous_style,
+                                               /* cascade_info = */ None,
+                                               context.error_reporter.clone(),
+                                               /* Metrics provider */ None,
+                                               CascadeFlags::empty());
             computed
         }
     }
@@ -422,7 +425,7 @@ pub fn maybe_start_animations(context: &SharedStyleContext,
             continue
         }
 
-        if let Some(ref anim) = context.stylist.animations().get(&name) {
+        if let Some(ref anim) = context.stylist.animations().get(&name.0) {
             debug!("maybe_start_animations: animation {} found", name);
 
             // If this animation doesn't have any keyframe, we can just continue
@@ -458,7 +461,7 @@ pub fn maybe_start_animations(context: &SharedStyleContext,
 
 
             new_animations_sender
-                .send(Animation::Keyframes(node, name.clone(), KeyframesAnimationState {
+                .send(Animation::Keyframes(node, name.0.clone(), KeyframesAnimationState {
                     started_at: animation_start,
                     duration: duration as f64,
                     delay: delay as f64,
@@ -537,7 +540,7 @@ pub fn update_style_for_animation(context: &SharedStyleContext,
 
             let maybe_index = style.get_box()
                                    .animation_name_iter()
-                                   .position(|animation_name| *name == animation_name);
+                                   .position(|animation_name| *name == animation_name.0);
 
             let index = match maybe_index {
                 Some(index) => index,

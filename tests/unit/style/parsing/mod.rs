@@ -21,12 +21,12 @@ macro_rules! assert_roundtrip {
     ($fun:expr, $input:expr, $output:expr) => {
         let parsed = $crate::parsing::parse($fun, $input)
                         .expect(&format!("Failed to parse {}", $input));
-        let serialized = ::cssparser::ToCss::to_css_string(&parsed);
+        let serialized = ToCss::to_css_string(&parsed);
         assert_eq!(serialized, $output);
 
         let re_parsed = $crate::parsing::parse($fun, &serialized)
                         .expect(&format!("Failed to parse serialization {}", $input));
-        let re_serialized = ::cssparser::ToCss::to_css_string(&re_parsed);
+        let re_serialized = ToCss::to_css_string(&re_parsed);
         assert_eq!(serialized, re_serialized);
     }
 }
@@ -36,18 +36,18 @@ macro_rules! assert_roundtrip_with_context {
         assert_roundtrip_with_context!($fun, $string, $string);
     };
     ($fun:expr,$input:expr, $output:expr) => {
-        let url = Url::parse("http://localhost").unwrap();
+        let url = ::servo_url::ServoUrl::parse("http://localhost").unwrap();
         let context = ParserContext::new(Origin::Author, &url, Box::new(CSSErrorReporterTest));
         let mut parser = Parser::new($input);
         let parsed = $fun(&context, &mut parser)
                      .expect(&format!("Failed to parse {}", $input));
-        let serialized = ::cssparser::ToCss::to_css_string(&parsed);
+        let serialized = ToCss::to_css_string(&parsed);
         assert_eq!(serialized, $output);
 
         let mut parser = Parser::new(&serialized);
         let re_parsed = $fun(&context, &mut parser)
                         .expect(&format!("Failed to parse {}", $input));
-        let re_serialized = ::cssparser::ToCss::to_css_string(&re_parsed);
+        let re_serialized = ToCss::to_css_string(&re_parsed);
         assert_eq!(serialized, re_serialized);
     }
 }
@@ -55,13 +55,15 @@ macro_rules! assert_roundtrip_with_context {
 
 macro_rules! parse_longhand {
     ($name:ident, $s:expr) => {{
-        let url = Url::parse("http://localhost").unwrap();
+        let url = ::servo_url::ServoUrl::parse("http://localhost").unwrap();
         let context = ParserContext::new(Origin::Author, &url, Box::new(CSSErrorReporterTest));
         $name::parse(&context, &mut Parser::new($s)).unwrap()
     }};
 }
 
+mod background;
 mod basic_shape;
+mod border;
 mod font;
 mod image;
 mod inherited_text;

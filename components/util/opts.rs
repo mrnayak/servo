@@ -11,6 +11,7 @@ use getopts::Options;
 use num_cpus;
 use prefs::{self, PrefValue, PREFS};
 use resource_files::set_resources_path;
+use servo_url::ServoUrl;
 use std::borrow::Cow;
 use std::cmp;
 use std::default::Default;
@@ -30,7 +31,7 @@ pub struct Opts {
     pub is_running_problem_test: bool,
 
     /// The initial URL to load.
-    pub url: Option<Url>,
+    pub url: Option<ServoUrl>,
 
     /// How many threads to use for CPU painting (`-t`).
     ///
@@ -63,7 +64,7 @@ pub struct Opts {
     /// won't be loaded
     pub userscripts: Option<String>,
 
-    pub user_stylesheets: Vec<(Vec<u8>, Url)>,
+    pub user_stylesheets: Vec<(Vec<u8>, ServoUrl)>,
 
     pub output_file: Option<String>,
 
@@ -108,6 +109,11 @@ pub struct Opts {
     /// where pixel perfect results are required when using fonts such as the Ahem
     /// font for layout tests.
     pub enable_text_antialiasing: bool,
+
+    /// If set with --enable-subpixel, use subpixel antialiasing for glyphs. In the future
+    /// this will likely become the default, but for now it's opt-in while we work
+    /// out any bugs and improve the implementation.
+    pub enable_subpixel_text_antialiasing: bool,
 
     /// If set with --disable-canvas-aa, disable antialiasing on the HTML canvas element.
     /// Like --disable-text-aa, this is useful for reftests where pixel perfect results are required.
@@ -159,6 +165,9 @@ pub struct Opts {
     /// Dumps the DOM after restyle.
     pub dump_style_tree: bool,
 
+    /// Dumps the rule tree.
+    pub dump_rule_tree: bool,
+
     /// Dumps the flow tree after a layout.
     pub dump_flow_tree: bool,
 
@@ -198,6 +207,9 @@ pub struct Opts {
     /// True to show webrender debug on screen.
     pub webrender_debug: bool,
 
+    /// True if webrender recording should be enabled.
+    pub webrender_record: bool,
+
     /// True to compile all webrender shaders at init time. This is mostly
     /// useful when modifying the shaders, to ensure they all compile
     /// after each change is made.
@@ -207,7 +219,7 @@ pub struct Opts {
     pub use_msaa: bool,
 
     /// Directory for a default config directory
-    pub config_dir: Option<String>,
+    pub config_dir: Option<PathBuf>,
 
     // don't skip any backtraces on panic
     pub full_backtraces: bool,
@@ -238,11 +250,17 @@ pub struct DebugOptions {
     /// Disable antialiasing of rendered text.
     pub disable_text_aa: bool,
 
+    /// Enable subpixel antialiasing of rendered text.
+    pub enable_subpixel_aa: bool,
+
     /// Disable antialiasing of rendered text on the HTML canvas element.
     pub disable_canvas_aa: bool,
 
     /// Print the DOM after each restyle.
     pub dump_style_tree: bool,
+
+    /// Dumps the rule tree.
+    pub dump_rule_tree: bool,
 
     /// Print the flow tree after each layout.
     pub dump_flow_tree: bool,
@@ -311,6 +329,9 @@ pub struct DebugOptions {
     /// Show webrender debug on screen.
     pub webrender_debug: bool,
 
+    /// Enable webrender recording.
+    pub webrender_record: bool,
+
     /// Use multisample antialiasing in WebRender.
     pub use_msaa: bool,
 
@@ -329,48 +350,48 @@ pub struct DebugOptions {
 
 
 impl DebugOptions {
-    pub fn new(debug_string: &str) -> Result<DebugOptions, &str> {
-        let mut debug_options = DebugOptions::default();
-
+    pub fn extend(&mut self, debug_string: String) -> Result<(), String> {
         for option in debug_string.split(',') {
             match option {
-                "help" => debug_options.help = true,
-                "bubble-widths" => debug_options.bubble_widths = true,
-                "disable-text-aa" => debug_options.disable_text_aa = true,
-                "disable-canvas-aa" => debug_options.disable_text_aa = true,
-                "dump-style-tree" => debug_options.dump_style_tree = true,
-                "dump-flow-tree" => debug_options.dump_flow_tree = true,
-                "dump-display-list" => debug_options.dump_display_list = true,
-                "dump-display-list-json" => debug_options.dump_display_list_json = true,
-                "dump-layer-tree" => debug_options.dump_layer_tree = true,
-                "relayout-event" => debug_options.relayout_event = true,
-                "profile-script-events" => debug_options.profile_script_events = true,
-                "profile-heartbeats" => debug_options.profile_heartbeats = true,
-                "show-compositor-borders" => debug_options.show_compositor_borders = true,
-                "show-fragment-borders" => debug_options.show_fragment_borders = true,
-                "show-parallel-paint" => debug_options.show_parallel_paint = true,
-                "show-parallel-layout" => debug_options.show_parallel_layout = true,
-                "paint-flashing" => debug_options.paint_flashing = true,
-                "trace-layout" => debug_options.trace_layout = true,
-                "disable-share-style-cache" => debug_options.disable_share_style_cache = true,
-                "style-sharing-stats" => debug_options.style_sharing_stats = true,
-                "convert-mouse-to-touch" => debug_options.convert_mouse_to_touch = true,
-                "replace-surrogates" => debug_options.replace_surrogates = true,
-                "gc-profile" => debug_options.gc_profile = true,
-                "load-webfonts-synchronously" => debug_options.load_webfonts_synchronously = true,
-                "disable-vsync" => debug_options.disable_vsync = true,
-                "wr-stats" => debug_options.webrender_stats = true,
-                "wr-debug" => debug_options.webrender_debug = true,
-                "msaa" => debug_options.use_msaa = true,
-                "full-backtraces" => debug_options.full_backtraces = true,
-                "precache-shaders" => debug_options.precache_shaders = true,
-                "signpost" => debug_options.signpost = true,
+                "help" => self.help = true,
+                "bubble-widths" => self.bubble_widths = true,
+                "disable-text-aa" => self.disable_text_aa = true,
+                "enable-subpixel-aa" => self.enable_subpixel_aa = true,
+                "disable-canvas-aa" => self.disable_text_aa = true,
+                "dump-style-tree" => self.dump_style_tree = true,
+                "dump-rule-tree" => self.dump_rule_tree = true,
+                "dump-flow-tree" => self.dump_flow_tree = true,
+                "dump-display-list" => self.dump_display_list = true,
+                "dump-display-list-json" => self.dump_display_list_json = true,
+                "dump-layer-tree" => self.dump_layer_tree = true,
+                "relayout-event" => self.relayout_event = true,
+                "profile-script-events" => self.profile_script_events = true,
+                "profile-heartbeats" => self.profile_heartbeats = true,
+                "show-compositor-borders" => self.show_compositor_borders = true,
+                "show-fragment-borders" => self.show_fragment_borders = true,
+                "show-parallel-paint" => self.show_parallel_paint = true,
+                "show-parallel-layout" => self.show_parallel_layout = true,
+                "paint-flashing" => self.paint_flashing = true,
+                "trace-layout" => self.trace_layout = true,
+                "disable-share-style-cache" => self.disable_share_style_cache = true,
+                "style-sharing-stats" => self.style_sharing_stats = true,
+                "convert-mouse-to-touch" => self.convert_mouse_to_touch = true,
+                "replace-surrogates" => self.replace_surrogates = true,
+                "gc-profile" => self.gc_profile = true,
+                "load-webfonts-synchronously" => self.load_webfonts_synchronously = true,
+                "disable-vsync" => self.disable_vsync = true,
+                "wr-stats" => self.webrender_stats = true,
+                "wr-debug" => self.webrender_debug = true,
+                "wr-record" => self.webrender_record = true,
+                "msaa" => self.use_msaa = true,
+                "full-backtraces" => self.full_backtraces = true,
+                "precache-shaders" => self.precache_shaders = true,
+                "signpost" => self.signpost = true,
                 "" => {},
-                _ => return Err(option)
+                _ => return Err(String::from(option)),
             };
         };
-
-        Ok(debug_options)
+        Ok(())
     }
 }
 
@@ -486,7 +507,7 @@ const DEFAULT_USER_AGENT: UserAgent = UserAgent::Desktop;
 pub fn default_opts() -> Opts {
     Opts {
         is_running_problem_test: false,
-        url: Some(Url::parse("about:blank").unwrap()),
+        url: Some(ServoUrl::parse("about:blank").unwrap()),
         paint_threads: 1,
         tile_size: 512,
         device_pixels_per_px: None,
@@ -509,6 +530,7 @@ pub fn default_opts() -> Opts {
         show_debug_parallel_layout: false,
         paint_flashing: false,
         enable_text_antialiasing: false,
+        enable_subpixel_text_antialiasing: false,
         enable_canvas_antialiasing: false,
         trace_layout: false,
         debugger_port: None,
@@ -521,6 +543,7 @@ pub fn default_opts() -> Opts {
         random_pipeline_closure_seed: None,
         sandbox: false,
         dump_style_tree: false,
+        dump_rule_tree: false,
         dump_flow_tree: false,
         dump_display_list: false,
         dump_display_list_json: false,
@@ -540,6 +563,7 @@ pub fn default_opts() -> Opts {
         full_backtraces: false,
         is_printing_version: false,
         webrender_debug: false,
+        webrender_record: false,
         precache_shaders: false,
         signpost: false,
     }
@@ -587,8 +611,8 @@ pub fn from_cmdline_args(args: &[String]) -> ArgumentParsingResult {
                 "Probability of randomly closing a pipeline (for testing constellation hardening).",
                 "0.0");
     opts.optopt("", "random-pipeline-closure-seed", "A fixed seed for repeatbility of random pipeline closure.", "");
-    opts.optopt("Z", "debug",
-                "A comma-separated string of debug options. Pass help to show available options.", "");
+    opts.optmulti("Z", "debug",
+                  "A comma-separated string of debug options. Pass help to show available options.", "");
     opts.optflag("h", "help", "Print this message");
     opts.optopt("", "resources-path", "Path to find static resources", "/home/servo/resources");
     opts.optopt("", "content-process" , "Run as a content process and connect to the given pipe",
@@ -621,15 +645,13 @@ pub fn from_cmdline_args(args: &[String]) -> ArgumentParsingResult {
         return ArgumentParsingResult::ContentProcess(content_process);
     }
 
-    let debug_string = match opt_match.opt_str("Z") {
-        Some(string) => string,
-        None => String::new()
-    };
+    let mut debug_options = DebugOptions::default();
 
-    let debug_options = match DebugOptions::new(&debug_string) {
-        Ok(debug_options) => debug_options,
-        Err(e) => args_fail(&format!("error: unrecognized debug option: {}", e)),
-    };
+    for debug_string in opt_match.opt_strs("Z") {
+        if let Err(e) = debug_options.extend(debug_string) {
+            return args_fail(&format!("error: unrecognized debug option: {}", e));
+        }
+    }
 
     if debug_options.help {
         print_debug_usage(app_name)
@@ -770,7 +792,7 @@ pub fn from_cmdline_args(args: &[String]) -> ArgumentParsingResult {
 
     let user_stylesheets = opt_match.opt_strs("user-stylesheet").iter().map(|filename| {
         let path = cwd.join(filename);
-        let url = Url::from_file_path(&path).unwrap();
+        let url = ServoUrl::from_url(Url::from_file_path(&path).unwrap());
         let mut contents = Vec::new();
         File::open(path)
             .unwrap_or_else(|err| args_fail(&format!("Couldn't open {}: {}", filename, err)))
@@ -822,8 +844,10 @@ pub fn from_cmdline_args(args: &[String]) -> ArgumentParsingResult {
         show_debug_parallel_layout: debug_options.show_parallel_layout,
         paint_flashing: debug_options.paint_flashing,
         enable_text_antialiasing: !debug_options.disable_text_aa,
+        enable_subpixel_text_antialiasing: debug_options.enable_subpixel_aa,
         enable_canvas_antialiasing: !debug_options.disable_canvas_aa,
         dump_style_tree: debug_options.dump_style_tree,
+        dump_rule_tree: debug_options.dump_rule_tree,
         dump_flow_tree: debug_options.dump_flow_tree,
         dump_display_list: debug_options.dump_display_list,
         dump_display_list_json: debug_options.dump_display_list_json,
@@ -837,10 +861,11 @@ pub fn from_cmdline_args(args: &[String]) -> ArgumentParsingResult {
         enable_vsync: !debug_options.disable_vsync,
         webrender_stats: debug_options.webrender_stats,
         use_msaa: debug_options.use_msaa,
-        config_dir: opt_match.opt_str("config-dir"),
+        config_dir: opt_match.opt_str("config-dir").map(Into::into),
         full_backtraces: debug_options.full_backtraces,
         is_printing_version: is_printing_version,
         webrender_debug: debug_options.webrender_debug,
+        webrender_record: debug_options.webrender_record,
         precache_shaders: debug_options.precache_shaders,
         signpost: debug_options.signpost,
     };
@@ -916,11 +941,11 @@ pub fn get() -> &'static Opts {
     &OPTIONS
 }
 
-pub fn parse_url_or_filename(cwd: &Path, input: &str) -> Result<Url, ()> {
-    match Url::parse(input) {
+pub fn parse_url_or_filename(cwd: &Path, input: &str) -> Result<ServoUrl, ()> {
+    match ServoUrl::parse(input) {
         Ok(url) => Ok(url),
         Err(url::ParseError::RelativeUrlWithoutBase) => {
-            Url::from_file_path(&*cwd.join(input))
+            Url::from_file_path(&*cwd.join(input)).map(ServoUrl::from_url)
         }
         Err(_) => Err(()),
     }

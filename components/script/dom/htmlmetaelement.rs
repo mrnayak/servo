@@ -8,21 +8,23 @@ use dom::bindings::codegen::Bindings::HTMLMetaElementBinding;
 use dom::bindings::codegen::Bindings::HTMLMetaElementBinding::HTMLMetaElementMethods;
 use dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use dom::bindings::inheritance::Castable;
-use dom::bindings::js::{Root, RootedReference};
+use dom::bindings::js::{JS, MutNullableHeap, Root, RootedReference};
 use dom::bindings::str::DOMString;
+use dom::cssstylesheet::CSSStyleSheet;
 use dom::document::Document;
 use dom::element::{AttributeMutation, Element};
 use dom::htmlelement::HTMLElement;
 use dom::htmlheadelement::HTMLHeadElement;
-use dom::node::{Node, UnbindContext, document_from_node};
+use dom::node::{Node, UnbindContext, document_from_node, window_from_node};
 use dom::virtualmethods::VirtualMethods;
 use html5ever_atoms::LocalName;
 use parking_lot::RwLock;
 use std::ascii::AsciiExt;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use style::attr::AttrValue;
 use style::str::HTML_SPACE_CHARACTERS;
-use style::stylesheets::{Stylesheet, CSSRule, Origin};
+use style::stylesheets::{Stylesheet, CssRule, Origin};
 use style::viewport::ViewportRule;
 
 #[dom_struct]
@@ -30,6 +32,7 @@ pub struct HTMLMetaElement {
     htmlelement: HTMLElement,
     #[ignore_heap_size_of = "Arc"]
     stylesheet: DOMRefCell<Option<Arc<Stylesheet>>>,
+    cssom_stylesheet: MutNullableHeap<JS<CSSStyleSheet>>,
 }
 
 impl HTMLMetaElement {
@@ -39,6 +42,7 @@ impl HTMLMetaElement {
         HTMLMetaElement {
             htmlelement: HTMLElement::new_inherited(local_name, prefix, document),
             stylesheet: DOMRefCell::new(None),
+            cssom_stylesheet: MutNullableHeap::new(None),
         }
     }
 
@@ -53,6 +57,18 @@ impl HTMLMetaElement {
 
     pub fn get_stylesheet(&self) -> Option<Arc<Stylesheet>> {
         self.stylesheet.borrow().clone()
+    }
+
+    pub fn get_cssom_stylesheet(&self) -> Option<Root<CSSStyleSheet>> {
+        self.get_stylesheet().map(|sheet| {
+            self.cssom_stylesheet.or_init(|| {
+                CSSStyleSheet::new(&window_from_node(self),
+                                   "text/css".into(),
+                                   None, // todo handle location
+                                   None, // todo handle title
+                                   sheet)
+            })
+        })
     }
 
     fn process_attributes(&self) {
@@ -81,12 +97,12 @@ impl HTMLMetaElement {
             if !content.is_empty() {
                 if let Some(translated_rule) = ViewportRule::from_meta(&**content) {
                     *self.stylesheet.borrow_mut() = Some(Arc::new(Stylesheet {
-                        rules: vec![CSSRule::Viewport(Arc::new(RwLock::new(translated_rule)))],
+                        rules: vec![CssRule::Viewport(Arc::new(RwLock::new(translated_rule)))].into(),
                         origin: Origin::Author,
-                        media: None,
+                        media: Default::default(),
                         // Viewport constraints are always recomputed on resize; they don't need to
                         // force all styles to be recomputed.
-                        dirty_on_viewport_size_change: false,
+                        dirty_on_viewport_size_change: AtomicBool::new(false),
                     }));
                     let doc = document_from_node(self);
                     doc.invalidate_stylesheets();

@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use app_units::Au;
+use bluetooth_traits::BluetoothRequest;
 use cssparser::Parser;
 use devtools_traits::{ScriptToDevtoolsControlMsg, TimelineMarker, TimelineMarkerType};
 use dom::bindings::callback::ExceptionHandling;
@@ -44,6 +45,7 @@ use dom::performance::Performance;
 use dom::promise::Promise;
 use dom::screen::Screen;
 use dom::storage::Storage;
+use dom::testrunner::TestRunner;
 use euclid::{Point2D, Rect, Size2D};
 use fetch;
 use ipc_channel::ipc::{self, IpcSender};
@@ -51,9 +53,8 @@ use js::jsapi::{HandleObject, HandleValue, JSAutoCompartment, JSContext};
 use js::jsapi::{JS_GC, JS_GetRuntime, SetWindowProxy};
 use js::jsval::UndefinedValue;
 use js::rust::Runtime;
-use msg::constellation_msg::{FrameType, PipelineId, ReferrerPolicy};
-use net_traits::ResourceThreads;
-use net_traits::bluetooth_thread::BluetoothMethodMsg;
+use msg::constellation_msg::{FrameType, PipelineId};
+use net_traits::{ResourceThreads, ReferrerPolicy};
 use net_traits::image_cache_thread::{ImageCacheChan, ImageCacheThread};
 use net_traits::storage_thread::StorageType;
 use num_traits::ToPrimitive;
@@ -75,6 +76,7 @@ use script_traits::{DocumentState, TimerEvent, TimerEventId};
 use script_traits::{ScriptMsg as ConstellationMsg, TimerEventRequest, WindowSizeData, WindowSizeType};
 use script_traits::webdriver_msg::{WebDriverJSError, WebDriverJSResult};
 use servo_atoms::Atom;
+use servo_url::ServoUrl;
 use std::ascii::AsciiExt;
 use std::borrow::ToOwned;
 use std::cell::Cell;
@@ -90,7 +92,7 @@ use style::context::ReflowGoal;
 use style::error_reporting::ParseErrorReporter;
 use style::media_queries;
 use style::properties::longhands::overflow_x;
-use style::selector_impl::PseudoElement;
+use style::selector_parser::PseudoElement;
 use style::str::HTML_SPACE_CHARACTERS;
 use task_source::dom_manipulation::DOMManipulationTaskSource;
 use task_source::file_reading::FileReadingTaskSource;
@@ -101,7 +103,7 @@ use time;
 use timers::{IsInterval, TimerCallback};
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use tinyfiledialogs::{self, MessageBoxIcon};
-use url::Url;
+use url::Position;
 use util::geometry::{self, max_rect};
 use util::opts;
 use util::prefs::PREFS;
@@ -202,10 +204,7 @@ pub struct Window {
 
     /// A handle for communicating messages to the bluetooth thread.
     #[ignore_heap_size_of = "channels are hard"]
-    bluetooth_thread: IpcSender<BluetoothMethodMsg>,
-
-    /// Pending scroll to fragment event, if any
-    fragment_name: DOMRefCell<Option<String>>,
+    bluetooth_thread: IpcSender<BluetoothRequest>,
 
     /// An enlarged rectangle around the page contents visible in the viewport, used
     /// to prevent creating display list items for content that is far away from the viewport.
@@ -239,6 +238,8 @@ pub struct Window {
 
     /// All the MediaQueryLists we need to update
     media_query_lists: WeakMediaQueryListVec,
+
+    test_runner: MutNullableHeap<JS<TestRunner>>,
 }
 
 impl Window {
@@ -264,7 +265,7 @@ impl Window {
         self.user_interaction_task_source.clone()
     }
 
-    pub fn networking_task_source(&self) -> Box<ScriptChan + Send> {
+    pub fn networking_task_source(&self) -> NetworkingTaskSource {
         self.networking_task_source.clone()
     }
 
@@ -301,7 +302,7 @@ impl Window {
         self.browsing_context.get().unwrap()
     }
 
-    pub fn bluetooth_thread(&self) -> IpcSender<BluetoothMethodMsg> {
+    pub fn bluetooth_thread(&self) -> IpcSender<BluetoothRequest> {
         self.bluetooth_thread.clone()
     }
 
@@ -480,8 +481,10 @@ impl WindowMethods for Window {
         self.navigator.or_init(|| Navigator::new(self))
     }
 
+    #[allow(unsafe_code)]
     // https://html.spec.whatwg.org/multipage/#dom-windowtimers-settimeout
-    fn SetTimeout(&self, _cx: *mut JSContext, callback: Rc<Function>, timeout: i32, args: Vec<HandleValue>) -> i32 {
+    unsafe fn SetTimeout(&self, _cx: *mut JSContext, callback: Rc<Function>, timeout: i32,
+                         args: Vec<HandleValue>) -> i32 {
         self.upcast::<GlobalScope>().set_timeout_or_interval(
             TimerCallback::FunctionTimerCallback(callback),
             args,
@@ -489,8 +492,10 @@ impl WindowMethods for Window {
             IsInterval::NonInterval)
     }
 
+    #[allow(unsafe_code)]
     // https://html.spec.whatwg.org/multipage/#dom-windowtimers-settimeout
-    fn SetTimeout_(&self, _cx: *mut JSContext, callback: DOMString, timeout: i32, args: Vec<HandleValue>) -> i32 {
+    unsafe fn SetTimeout_(&self, _cx: *mut JSContext, callback: DOMString,
+                          timeout: i32, args: Vec<HandleValue>) -> i32 {
         self.upcast::<GlobalScope>().set_timeout_or_interval(
             TimerCallback::StringTimerCallback(callback),
             args,
@@ -503,8 +508,10 @@ impl WindowMethods for Window {
         self.upcast::<GlobalScope>().clear_timeout_or_interval(handle);
     }
 
+    #[allow(unsafe_code)]
     // https://html.spec.whatwg.org/multipage/#dom-windowtimers-setinterval
-    fn SetInterval(&self, _cx: *mut JSContext, callback: Rc<Function>, timeout: i32, args: Vec<HandleValue>) -> i32 {
+    unsafe fn SetInterval(&self, _cx: *mut JSContext, callback: Rc<Function>,
+                          timeout: i32, args: Vec<HandleValue>) -> i32 {
         self.upcast::<GlobalScope>().set_timeout_or_interval(
             TimerCallback::FunctionTimerCallback(callback),
             args,
@@ -512,8 +519,10 @@ impl WindowMethods for Window {
             IsInterval::Interval)
     }
 
+    #[allow(unsafe_code)]
     // https://html.spec.whatwg.org/multipage/#dom-windowtimers-setinterval
-    fn SetInterval_(&self, _cx: *mut JSContext, callback: DOMString, timeout: i32, args: Vec<HandleValue>) -> i32 {
+    unsafe fn SetInterval_(&self, _cx: *mut JSContext, callback: DOMString,
+                           timeout: i32, args: Vec<HandleValue>) -> i32 {
         self.upcast::<GlobalScope>().set_timeout_or_interval(
             TimerCallback::StringTimerCallback(callback),
             args,
@@ -607,8 +616,9 @@ impl WindowMethods for Window {
         doc.cancel_animation_frame(ident);
     }
 
+    #[allow(unsafe_code)]
     // https://html.spec.whatwg.org/multipage/#dom-window-postmessage
-    fn PostMessage(&self,
+    unsafe fn PostMessage(&self,
                    cx: *mut JSContext,
                    message: HandleValue,
                    origin: DOMString)
@@ -621,7 +631,7 @@ impl WindowMethods for Window {
                 //               object, not self's.
                 Some(self.Document().origin().copy())
             },
-            url => match Url::parse(&url) {
+            url => match ServoUrl::parse(&url) {
                 Ok(url) => Some(Origin::new(&url)),
                 Err(_) => return Err(Error::Syntax),
             }
@@ -667,8 +677,8 @@ impl WindowMethods for Window {
     }
 
     #[allow(unsafe_code)]
-    fn WebdriverCallback(&self, cx: *mut JSContext, val: HandleValue) {
-        let rv = unsafe { jsval_to_webdriver(cx, val) };
+    unsafe fn WebdriverCallback(&self, cx: *mut JSContext, val: HandleValue) {
+        let rv = jsval_to_webdriver(cx, val);
         let opt_chan = self.webdriver_script_chan.borrow_mut().take();
         if let Some(chan) = opt_chan {
             chan.send(rv).unwrap();
@@ -857,7 +867,7 @@ impl WindowMethods for Window {
 
     // check-tidy: no specs after this line
     fn OpenURLInDefaultBrowser(&self, href: DOMString) -> ErrorResult {
-        let url = try!(Url::parse(&href).map_err(|e| {
+        let url = try!(ServoUrl::parse(&href).map_err(|e| {
             Error::Type(format!("Couldn't parse URL: {}", e))
         }));
         match open::that(url.as_str()) {
@@ -880,6 +890,10 @@ impl WindowMethods for Window {
     // https://fetch.spec.whatwg.org/#fetch-method
     fn Fetch(&self, input: RequestOrUSVString, init: &RequestInit) -> Rc<Promise> {
         fetch::Fetch(&self.upcast(), input, init)
+    }
+
+    fn TestRunner(&self) -> Root<TestRunner> {
+        self.test_runner.or_init(|| TestRunner::new(self.upcast()))
     }
 }
 
@@ -1315,13 +1329,25 @@ impl Window {
     }
 
     /// Commence a new URL load which will either replace this window or scroll to a fragment.
-    pub fn load_url(&self, url: Url, replace: bool, referrer_policy: Option<ReferrerPolicy>) {
+    pub fn load_url(&self, url: ServoUrl, replace: bool, force_reload: bool,
+                    referrer_policy: Option<ReferrerPolicy>) {
         let doc = self.Document();
         let referrer_policy = referrer_policy.or(doc.get_referrer_policy());
 
+        // https://html.spec.whatwg.org/multipage/#navigating-across-documents
+        if !force_reload && url.as_url().unwrap()[..Position::AfterQuery] ==
+            doc.url().as_url().unwrap()[..Position::AfterQuery] {
+                // Step 5
+                if let Some(fragment) = url.fragment() {
+                    doc.check_and_scroll_fragment(fragment);
+                    doc.set_url(url.clone());
+                    return
+                }
+        }
+
         self.main_thread_script_chan().send(
             MainThreadScriptMsg::Navigate(self.upcast::<GlobalScope>().pipeline_id(),
-                LoadData::new(url, referrer_policy, Some(doc.url().clone())),
+                LoadData::new(url, referrer_policy, Some(doc.url())),
                 replace)).unwrap();
     }
 
@@ -1332,14 +1358,6 @@ impl Window {
                     ReflowReason::Timer);
     }
 
-    pub fn set_fragment_name(&self, fragment: Option<String>) {
-        *self.fragment_name.borrow_mut() = fragment;
-    }
-
-    pub fn steal_fragment_name(&self) -> Option<String> {
-        self.fragment_name.borrow_mut().take()
-    }
-
     pub fn set_window_size(&self, size: WindowSizeData) {
         self.window_size.set(Some(size));
     }
@@ -1348,8 +1366,8 @@ impl Window {
         self.window_size.get()
     }
 
-    pub fn get_url(&self) -> Url {
-        (*self.Document().url()).clone()
+    pub fn get_url(&self) -> ServoUrl {
+        self.Document().url()
     }
 
     pub fn layout_chan(&self) -> &Sender<Msg> {
@@ -1504,6 +1522,7 @@ impl Window {
 }
 
 impl Window {
+    #[allow(unsafe_code)]
     pub fn new(runtime: Rc<Runtime>,
                script_chan: MainThreadScriptChan,
                dom_task_source: DOMManipulationTaskSource,
@@ -1514,7 +1533,7 @@ impl Window {
                image_cache_chan: ImageCacheChan,
                image_cache_thread: ImageCacheThread,
                resource_threads: ResourceThreads,
-               bluetooth_thread: IpcSender<BluetoothMethodMsg>,
+               bluetooth_thread: IpcSender<BluetoothRequest>,
                mem_profiler_chan: mem::ProfilerChan,
                time_profiler_chan: ProfilerChan,
                devtools_chan: Option<IpcSender<ScriptToDevtoolsControlMsg>>,
@@ -1571,7 +1590,6 @@ impl Window {
             js_runtime: DOMRefCell::new(Some(runtime.clone())),
             bluetooth_thread: bluetooth_thread,
             page_clip_rect: Cell::new(max_rect()),
-            fragment_name: DOMRefCell::new(None),
             resize_event: Cell::new(None),
             layout_chan: layout_chan,
             layout_rpc: layout_rpc,
@@ -1588,9 +1606,12 @@ impl Window {
             error_reporter: error_reporter,
             scroll_offsets: DOMRefCell::new(HashMap::new()),
             media_query_lists: WeakMediaQueryListVec::new(),
+            test_runner: Default::default(),
         };
 
-        WindowBinding::Wrap(runtime.cx(), win)
+        unsafe {
+            WindowBinding::Wrap(runtime.cx(), win)
+        }
     }
 }
 

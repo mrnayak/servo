@@ -8,10 +8,8 @@ use cssparser::{Parser, SourcePosition};
 use error_reporting::ParseErrorReporter;
 #[cfg(feature = "gecko")]
 use gecko_bindings::sugar::refptr::{GeckoArcPrincipal, GeckoArcURI};
-use selector_impl::TheSelectorImpl;
-use selectors::parser::ParserContext as SelectorParserContext;
+use servo_url::ServoUrl;
 use stylesheets::Origin;
-use url::Url;
 
 #[cfg(not(feature = "gecko"))]
 pub struct ParserContextExtraData;
@@ -37,43 +35,30 @@ impl ParserContextExtraData {
 
 pub struct ParserContext<'a> {
     pub stylesheet_origin: Origin,
-    pub base_url: &'a Url,
-    pub selector_context: SelectorParserContext<TheSelectorImpl>,
+    pub base_url: &'a ServoUrl,
     pub error_reporter: Box<ParseErrorReporter + Send>,
     pub extra_data: ParserContextExtraData,
 }
 
 impl<'a> ParserContext<'a> {
-    pub fn new_with_extra_data(stylesheet_origin: Origin, base_url: &'a Url,
+    pub fn new_with_extra_data(stylesheet_origin: Origin, base_url: &'a ServoUrl,
                                error_reporter: Box<ParseErrorReporter + Send>,
                                extra_data: ParserContextExtraData)
                                -> ParserContext<'a> {
-        let mut selector_context = SelectorParserContext::new();
-        selector_context.in_user_agent_stylesheet = stylesheet_origin == Origin::UserAgent;
         ParserContext {
             stylesheet_origin: stylesheet_origin,
             base_url: base_url,
-            selector_context: selector_context,
             error_reporter: error_reporter,
             extra_data: extra_data,
         }
     }
 
-    pub fn new(stylesheet_origin: Origin, base_url: &'a Url, error_reporter: Box<ParseErrorReporter + Send>)
+    pub fn new(stylesheet_origin: Origin, base_url: &'a ServoUrl, error_reporter: Box<ParseErrorReporter + Send>)
                -> ParserContext<'a> {
         let extra_data = ParserContextExtraData::default();
         ParserContext::new_with_extra_data(stylesheet_origin, base_url, error_reporter, extra_data)
     }
 }
-
-
-impl<'a> ParserContext<'a> {
-    pub fn parse_url(&self, input: &str) -> Url {
-        self.base_url.join(input)
-            .unwrap_or_else(|_| Url::parse("about:invalid").unwrap())
-    }
-}
-
 
 /// Defaults to a no-op.
 /// Set a `RUST_LOG=style::errors` environment variable

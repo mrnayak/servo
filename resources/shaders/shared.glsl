@@ -25,7 +25,6 @@
     #define varying in
 
     // Uniform inputs
-    uniform sampler2D sMask;
 
     // Fragment shader outputs
     out vec4 oFragColor;
@@ -34,7 +33,10 @@
 //======================================================================================
 // Shared shader uniforms
 //======================================================================================
-uniform sampler2D sDiffuse;
+uniform sampler2D sColor0;
+uniform sampler2D sColor1;
+uniform sampler2D sColor2;
+uniform sampler2D sMask;
 
 //======================================================================================
 // Interpolator definitions

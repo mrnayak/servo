@@ -3,10 +3,12 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use app_units::Au;
-use cssparser::{Parser, ToCss};
+use cssparser::Parser;
 use env_logger;
 use euclid::Size2D;
 use parking_lot::RwLock;
+use servo_url::ServoUrl;
+use std::fmt::Write;
 use std::mem::transmute;
 use std::sync::{Arc, Mutex};
 use style::arc_ptr_eq;
@@ -14,7 +16,7 @@ use style::context::{LocalStyleContextCreationInfo, ReflowGoal, SharedStyleConte
 use style::dom::{NodeInfo, StylingMode, TElement, TNode};
 use style::error_reporting::StdoutErrorReporter;
 use style::gecko::data::{NUM_THREADS, PerDocumentStyleData};
-use style::gecko::selector_impl::{GeckoSelectorImpl, PseudoElement};
+use style::gecko::selector_parser::{SelectorImpl, PseudoElement};
 use style::gecko::snapshot::GeckoElementSnapshot;
 use style::gecko::traversal::RecalcStyleOnly;
 use style::gecko::wrapper::{GeckoElement, GeckoNode};
@@ -25,9 +27,9 @@ use style::gecko_bindings::bindings::{RawServoStyleSetBorrowed, RawServoStyleSet
 use style::gecko_bindings::bindings::{RawServoStyleSheetBorrowed, ServoComputedValuesBorrowed};
 use style::gecko_bindings::bindings::{RawServoStyleSheetStrong, ServoComputedValuesStrong};
 use style::gecko_bindings::bindings::{ThreadSafePrincipalHolder, ThreadSafeURIHolder};
+use style::gecko_bindings::bindings::{nsACString, nsAString};
 use style::gecko_bindings::bindings::Gecko_Utf8SliceToString;
 use style::gecko_bindings::bindings::ServoComputedValuesBorrowedOrNull;
-use style::gecko_bindings::bindings::nsACString;
 use style::gecko_bindings::structs::{SheetParsingMode, nsIAtom};
 use style::gecko_bindings::structs::ServoElementSnapshot;
 use style::gecko_bindings::structs::nsRestyleHint;
@@ -39,14 +41,14 @@ use style::parallel;
 use style::parser::{ParserContext, ParserContextExtraData};
 use style::properties::{CascadeFlags, ComputedValues, Importance, PropertyDeclaration};
 use style::properties::{PropertyDeclarationParseResult, PropertyDeclarationBlock};
-use style::properties::{cascade, parse_one_declaration};
-use style::selector_impl::PseudoElementCascadeType;
-use style::selector_matching::ApplicableDeclarationBlock;
+use style::properties::{apply_declarations, parse_one_declaration};
+use style::selector_parser::PseudoElementCascadeType;
 use style::sequential;
 use style::string_cache::Atom;
 use style::stylesheets::{Origin, Stylesheet};
+use style::thread_state;
 use style::timer::Timer;
-use url::Url;
+use style_traits::ToCss;
 
 /*
  * For Gecko->Servo function calls, we need to redeclare the same signature that was declared in
@@ -65,6 +67,9 @@ pub extern "C" fn Servo_Initialize() -> () {
 
     // Allocate our default computed values.
     unsafe { ComputedValues::initialize(); }
+
+    // Pretend that we're a Servo Layout thread, to make some assertions happy.
+    thread_state::initialize(thread_state::LAYOUT);
 }
 
 #[no_mangle]
@@ -131,23 +136,24 @@ pub extern "C" fn Servo_RestyleWithAddedDeclaration(declarations: RawServoDeclar
                                                     previous_style: ServoComputedValuesBorrowed)
   -> ServoComputedValuesStrong
 {
-    let declarations = RwLock::<PropertyDeclarationBlock>::as_arc(&declarations);
-    let declaration_block = ApplicableDeclarationBlock {
-        mixed_declarations: declarations.clone(),
-        importance: Importance::Normal,
-        source_order: 0,
-        specificity: ::std::u32::MAX,
-    };
     let previous_style = ComputedValues::as_arc(&previous_style);
+    let declarations = RwLock::<PropertyDeclarationBlock>::as_arc(&declarations);
+
+    let guard = declarations.read();
+
+    let declarations = || {
+        guard.declarations.iter().rev().map(|&(ref decl, _importance)| decl)
+    };
 
     // FIXME (bug 1303229): Use the actual viewport size here
-    let (computed, _) = cascade(Size2D::new(Au(0), Au(0)),
-                                &[declaration_block],
-                                Some(previous_style),
-                                None,
-                                None,
-                                Box::new(StdoutErrorReporter),
-                                CascadeFlags::empty());
+    let computed = apply_declarations(Size2D::new(Au(0), Au(0)),
+                                      /* is_root_element = */ false,
+                                      declarations,
+                                      previous_style,
+                                      None,
+                                      Box::new(StdoutErrorReporter),
+                                      None,
+                                      CascadeFlags::empty());
     Arc::new(computed).into_strong()
 }
 
@@ -160,6 +166,22 @@ pub extern "C" fn Servo_StyleWorkerThreadCount() -> u32 {
 pub extern "C" fn Servo_Node_ClearNodeData(node: RawGeckoNodeBorrowed) -> () {
     if let Some(element) = GeckoNode(node).as_element() {
         element.clear_data();
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn Servo_StyleSheet_Empty(mode: SheetParsingMode) -> RawServoStyleSheetStrong {
+    let url = ServoUrl::parse("about:blank").unwrap();
+    let extra_data = ParserContextExtraData::default();
+    let origin = match mode {
+        SheetParsingMode::eAuthorSheetFeatures => Origin::Author,
+        SheetParsingMode::eUserSheetFeatures => Origin::User,
+        SheetParsingMode::eAgentSheetFeatures => Origin::UserAgent,
+    };
+    let sheet = Arc::new(Stylesheet::from_str(
+        "", url, origin, Default::default(), Box::new(StdoutErrorReporter), extra_data));
+    unsafe {
+        transmute(sheet)
     }
 }
 
@@ -180,14 +202,14 @@ pub extern "C" fn Servo_StyleSheet_FromUTF8Bytes(data: *const nsACString,
     };
 
     let base_str = unsafe { base_url.as_ref().unwrap().as_str_unchecked() };
-    let url = Url::parse(base_str).unwrap();
+    let url = ServoUrl::parse(base_str).unwrap();
     let extra_data = unsafe { ParserContextExtraData {
         base: Some(GeckoArcURI::new(base)),
         referrer: Some(GeckoArcURI::new(referrer)),
         principal: Some(GeckoArcPrincipal::new(principal)),
     }};
-    let sheet = Arc::new(Stylesheet::from_str(input, url, origin, Box::new(StdoutErrorReporter),
-                                              extra_data));
+    let sheet = Arc::new(Stylesheet::from_str(
+        input, url, origin, Default::default(), Box::new(StdoutErrorReporter), extra_data));
     unsafe {
         transmute(sheet)
     }
@@ -237,7 +259,7 @@ pub extern "C" fn Servo_StyleSet_RemoveStyleSheet(raw_data: RawServoStyleSetBorr
 
 #[no_mangle]
 pub extern "C" fn Servo_StyleSheet_HasRules(raw_sheet: RawServoStyleSheetBorrowed) -> bool {
-    !Stylesheet::as_arc(&raw_sheet).rules.is_empty()
+    !Stylesheet::as_arc(&raw_sheet).rules.0.read().is_empty()
 }
 
 #[no_mangle]
@@ -296,7 +318,8 @@ pub extern "C" fn Servo_ComputedValues_GetForAnonymousBox(parent_style_or_null: 
 
 
     let maybe_parent = ComputedValues::arc_from_borrowed(&parent_style_or_null);
-    let new_computed = data.stylist.precomputed_values_for_pseudo(&pseudo, maybe_parent, false);
+    let new_computed = data.stylist.precomputed_values_for_pseudo(&pseudo, maybe_parent, false)
+                           .map(|(computed, _rule_node)| computed);
     new_computed.map_or(Strong::null(), |c| c.into_strong())
 }
 
@@ -327,7 +350,7 @@ pub extern "C" fn Servo_ComputedValues_GetForPseudoElement(parent_style: ServoCo
     let element = GeckoElement(match_element);
 
 
-    match GeckoSelectorImpl::pseudo_element_cascade_type(&pseudo) {
+    match SelectorImpl::pseudo_element_cascade_type(&pseudo) {
         PseudoElementCascadeType::Eager => {
             let maybe_computed = element.get_pseudo_style(&pseudo);
             maybe_computed.map_or_else(parent_or_null, FFIArcHelpers::into_strong)
@@ -336,6 +359,7 @@ pub extern "C" fn Servo_ComputedValues_GetForPseudoElement(parent_style: ServoCo
             let parent = ComputedValues::as_arc(&parent_style);
             data.stylist
                 .lazily_compute_pseudo_element_style(&element, &pseudo, parent)
+                .map(|(c, _rule_node)| c)
                 .map_or_else(parent_or_null, FFIArcHelpers::into_strong)
         }
         PseudoElementCascadeType::Precomputed => {
@@ -388,7 +412,7 @@ pub extern "C" fn Servo_ParseProperty(property: *const nsACString, value: *const
     let name = unsafe { property.as_ref().unwrap().as_str_unchecked() };
     let value = unsafe { value.as_ref().unwrap().as_str_unchecked() };
     let base_str = unsafe { base_url.as_ref().unwrap().as_str_unchecked() };
-    let base_url = Url::parse(base_str).unwrap();
+    let base_url = ServoUrl::parse(base_str).unwrap();
     let extra_data = unsafe { ParserContextExtraData {
         base: Some(GeckoArcURI::new(base)),
         referrer: Some(GeckoArcURI::new(referrer)),
@@ -421,6 +445,18 @@ pub extern "C" fn Servo_ParseStyleAttribute(data: *const nsACString) -> RawServo
 }
 
 #[no_mangle]
+pub extern "C" fn Servo_DeclarationBlock_CreateEmpty() -> RawServoDeclarationBlockStrong {
+    Arc::new(RwLock::new(PropertyDeclarationBlock { declarations: vec![], important_count: 0 })).into_strong()
+}
+
+#[no_mangle]
+pub extern "C" fn Servo_DeclarationBlock_Clone(declarations: RawServoDeclarationBlockBorrowed)
+                                               -> RawServoDeclarationBlockStrong {
+    let declarations = RwLock::<PropertyDeclarationBlock>::as_arc(&declarations);
+    Arc::new(RwLock::new(declarations.read().clone())).into_strong()
+}
+
+#[no_mangle]
 pub extern "C" fn Servo_DeclarationBlock_AddRef(declarations: RawServoDeclarationBlockBorrowed) {
     unsafe { RwLock::<PropertyDeclarationBlock>::addref(declarations) };
 }
@@ -435,6 +471,13 @@ pub extern "C" fn Servo_DeclarationBlock_Equals(a: RawServoDeclarationBlockBorro
                                                 b: RawServoDeclarationBlockBorrowed)
                                                 -> bool {
     *RwLock::<PropertyDeclarationBlock>::as_arc(&a).read() == *RwLock::<PropertyDeclarationBlock>::as_arc(&b).read()
+}
+
+#[no_mangle]
+pub extern "C" fn Servo_DeclarationBlock_GetCssText(declarations: RawServoDeclarationBlockBorrowed,
+                                                    result: *mut nsAString) {
+    let declarations = RwLock::<PropertyDeclarationBlock>::as_arc(&declarations);
+    declarations.read().to_css(unsafe { result.as_mut().unwrap() }).unwrap();
 }
 
 #[no_mangle]
@@ -467,6 +510,85 @@ pub extern "C" fn Servo_DeclarationBlock_SerializeOneValue(
     unsafe {
         Gecko_Utf8SliceToString(buffer, value.as_ptr(), length);
     }
+}
+
+#[no_mangle]
+pub extern "C" fn Servo_DeclarationBlock_Count(declarations: RawServoDeclarationBlockBorrowed) -> u32 {
+     let declarations = RwLock::<PropertyDeclarationBlock>::as_arc(&declarations);
+     declarations.read().declarations.len() as u32
+}
+
+#[no_mangle]
+pub extern "C" fn Servo_DeclarationBlock_GetNthProperty(declarations: RawServoDeclarationBlockBorrowed,
+                                                        index: u32, result: *mut nsAString) -> bool {
+    let declarations = RwLock::<PropertyDeclarationBlock>::as_arc(&declarations);
+    if let Some(&(ref decl, _)) = declarations.read().declarations.get(index as usize) {
+        let result = unsafe { result.as_mut().unwrap() };
+        write!(result, "{}", decl.name()).unwrap();
+        true
+    } else {
+        false
+    }
+}
+
+// FIXME Methods of PropertyDeclarationBlock should take atoms directly.
+// This function is just a temporary workaround before that finishes.
+fn get_property_name_from_atom(atom: *mut nsIAtom, is_custom: bool) -> String {
+    let atom = Atom::from(atom);
+    if !is_custom {
+        atom.to_string()
+    } else {
+        let mut result = String::with_capacity(atom.len() as usize + 2);
+        write!(result, "--{}", atom).unwrap();
+        result
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn Servo_DeclarationBlock_GetPropertyValue(declarations: RawServoDeclarationBlockBorrowed,
+                                                          property: *mut nsIAtom, is_custom: bool,
+                                                          value: *mut nsAString) {
+    let declarations = RwLock::<PropertyDeclarationBlock>::as_arc(&declarations);
+    let property = get_property_name_from_atom(property, is_custom);
+    declarations.read().property_value_to_css(&property, unsafe { value.as_mut().unwrap() }).unwrap();
+}
+
+#[no_mangle]
+pub extern "C" fn Servo_DeclarationBlock_GetPropertyIsImportant(declarations: RawServoDeclarationBlockBorrowed,
+                                                                property: *mut nsIAtom, is_custom: bool) -> bool {
+    let declarations = RwLock::<PropertyDeclarationBlock>::as_arc(&declarations);
+    let property = get_property_name_from_atom(property, is_custom);
+    declarations.read().property_priority(&property).important()
+}
+
+#[no_mangle]
+pub extern "C" fn Servo_DeclarationBlock_SetProperty(declarations: RawServoDeclarationBlockBorrowed,
+                                                     property: *mut nsIAtom, is_custom: bool,
+                                                     value: *mut nsACString, is_important: bool) -> bool {
+    let property = get_property_name_from_atom(property, is_custom);
+    let value = unsafe { value.as_ref().unwrap().as_str_unchecked() };
+    // FIXME Needs real URL and ParserContextExtraData.
+    let base_url = &*DUMMY_BASE_URL;
+    let extra_data = ParserContextExtraData::default();
+    if let Ok(decls) = parse_one_declaration(&property, value, &base_url,
+                                             Box::new(StdoutErrorReporter), extra_data) {
+        let mut declarations = RwLock::<PropertyDeclarationBlock>::as_arc(&declarations).write();
+        let importance = if is_important { Importance::Important } else { Importance::Normal };
+        for decl in decls.into_iter() {
+            declarations.set_parsed_declaration(decl, importance);
+        }
+        true
+    } else {
+        false
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn Servo_DeclarationBlock_RemoveProperty(declarations: RawServoDeclarationBlockBorrowed,
+                                                        property: *mut nsIAtom, is_custom: bool) {
+    let declarations = RwLock::<PropertyDeclarationBlock>::as_arc(&declarations);
+    let property = get_property_name_from_atom(property, is_custom);
+    declarations.write().remove_property(&property);
 }
 
 #[no_mangle]

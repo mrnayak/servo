@@ -2,13 +2,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+use ReferrerPolicy;
 use hyper::header::Headers;
 use hyper::method::Method;
-use msg::constellation_msg::{PipelineId, ReferrerPolicy};
+use msg::constellation_msg::PipelineId;
+use servo_url::ServoUrl;
 use std::cell::{Cell, RefCell};
 use std::default::Default;
 use std::mem::swap;
-use url::{Origin as UrlOrigin, Url};
+use url::{Origin as UrlOrigin};
 
 /// An [initiator](https://fetch.spec.whatwg.org/#concept-request-initiator)
 #[derive(Copy, Clone, PartialEq, HeapSizeOf)]
@@ -48,7 +50,7 @@ pub enum Referrer {
     NoReferrer,
     /// Default referrer if nothing is specified
     Client,
-    ReferrerUrl(Url)
+    ReferrerUrl(ServoUrl)
 }
 
 /// A [request mode](https://fetch.spec.whatwg.org/#concept-request-mode)
@@ -56,8 +58,8 @@ pub enum Referrer {
 pub enum RequestMode {
     Navigate,
     SameOrigin,
-    NoCORS,
-    CORSMode
+    NoCors,
+    CorsMode
 }
 
 /// Request [credentials mode](https://fetch.spec.whatwg.org/#concept-request-credentials-mode)
@@ -69,7 +71,7 @@ pub enum CredentialsMode {
 }
 
 /// [Cache mode](https://fetch.spec.whatwg.org/#concept-request-cache-mode)
-#[derive(Copy, Clone, PartialEq, HeapSizeOf)]
+#[derive(Copy, Clone, PartialEq, Serialize, Deserialize, HeapSizeOf)]
 pub enum CacheMode {
     Default,
     NoStore,
@@ -80,7 +82,7 @@ pub enum CacheMode {
 }
 
 /// [Redirect mode](https://fetch.spec.whatwg.org/#concept-request-redirect-mode)
-#[derive(Copy, Clone, PartialEq, HeapSizeOf)]
+#[derive(Copy, Clone, PartialEq, Serialize, Deserialize, HeapSizeOf)]
 pub enum RedirectMode {
     Follow,
     Error,
@@ -91,7 +93,7 @@ pub enum RedirectMode {
 #[derive(Copy, Clone, PartialEq, HeapSizeOf)]
 pub enum ResponseTainting {
     Basic,
-    CORSTainting,
+    CorsTainting,
     Opaque
 }
 
@@ -105,19 +107,21 @@ pub enum Window {
 
 /// [CORS settings attribute](https://html.spec.whatwg.org/multipage/#attr-crossorigin-anonymous)
 #[derive(Copy, Clone, PartialEq, Serialize, Deserialize)]
-pub enum CORSSettings {
+pub enum CorsSettings {
     Anonymous,
     UseCredentials
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, HeapSizeOf)]
 pub struct RequestInit {
     #[serde(deserialize_with = "::hyper_serde::deserialize",
             serialize_with = "::hyper_serde::serialize")]
+    #[ignore_heap_size_of = "Defined in hyper"]
     pub method: Method,
-    pub url: Url,
+    pub url: ServoUrl,
     #[serde(deserialize_with = "::hyper_serde::deserialize",
             serialize_with = "::hyper_serde::serialize")]
+    #[ignore_heap_size_of = "Defined in hyper"]
     pub headers: Headers,
     pub unsafe_request: bool,
     pub body: Option<Vec<u8>>,
@@ -126,37 +130,41 @@ pub struct RequestInit {
     pub destination: Destination,
     pub synchronous: bool,
     pub mode: RequestMode,
+    pub cache_mode: CacheMode,
     pub use_cors_preflight: bool,
     pub credentials_mode: CredentialsMode,
     pub use_url_credentials: bool,
     // this should actually be set by fetch, but fetch
     // doesn't have info about the client right now
-    pub origin: Url,
+    pub origin: ServoUrl,
     // XXXManishearth these should be part of the client object
-    pub referrer_url: Option<Url>,
+    pub referrer_url: Option<ServoUrl>,
     pub referrer_policy: Option<ReferrerPolicy>,
     pub pipeline_id: Option<PipelineId>,
+    pub redirect_mode: RedirectMode,
 }
 
 impl Default for RequestInit {
     fn default() -> RequestInit {
         RequestInit {
             method: Method::Get,
-            url: Url::parse("about:blank").unwrap(),
+            url: ServoUrl::parse("about:blank").unwrap(),
             headers: Headers::new(),
             unsafe_request: false,
             body: None,
             type_: Type::None,
             destination: Destination::None,
             synchronous: false,
-            mode: RequestMode::NoCORS,
+            mode: RequestMode::NoCors,
+            cache_mode: CacheMode::Default,
             use_cors_preflight: false,
             credentials_mode: CredentialsMode::Omit,
             use_url_credentials: false,
-            origin: Url::parse("about:blank").unwrap(),
+            origin: ServoUrl::parse("about:blank").unwrap(),
             referrer_url: None,
             referrer_policy: None,
             pipeline_id: None,
+            redirect_mode: RedirectMode::Follow,
         }
     }
 }
@@ -198,14 +206,14 @@ pub struct Request {
     pub integrity_metadata: RefCell<String>,
     // Use the last method on url_list to act as spec current url field, and
     // first method to act as spec url field
-    pub url_list: RefCell<Vec<Url>>,
+    pub url_list: RefCell<Vec<ServoUrl>>,
     pub redirect_count: Cell<u32>,
     pub response_tainting: Cell<ResponseTainting>,
     pub done: Cell<bool>,
 }
 
 impl Request {
-    pub fn new(url: Url,
+    pub fn new(url: ServoUrl,
                origin: Option<Origin>,
                is_service_worker_global_scope: bool,
                pipeline_id: Option<PipelineId>) -> Request {
@@ -229,7 +237,7 @@ impl Request {
             referrer_policy: Cell::new(None),
             pipeline_id: Cell::new(pipeline_id),
             synchronous: false,
-            mode: RequestMode::NoCORS,
+            mode: RequestMode::NoCors,
             use_cors_preflight: false,
             credentials_mode: CredentialsMode::Omit,
             use_url_credentials: false,
@@ -258,6 +266,7 @@ impl Request {
         req.use_cors_preflight = init.use_cors_preflight;
         req.credentials_mode = init.credentials_mode;
         req.use_url_credentials = init.use_url_credentials;
+        req.cache_mode.set(init.cache_mode);
         *req.referrer.borrow_mut() = if let Some(url) = init.referrer_url {
             Referrer::ReferrerUrl(url)
         } else {
@@ -265,14 +274,15 @@ impl Request {
         };
         req.referrer_policy.set(init.referrer_policy);
         req.pipeline_id.set(init.pipeline_id);
+        req.redirect_mode.set(init.redirect_mode);
         req
     }
 
-    pub fn url(&self) -> Url {
+    pub fn url(&self) -> ServoUrl {
         self.url_list.borrow().first().unwrap().clone()
     }
 
-    pub fn current_url(&self) -> Url {
+    pub fn current_url(&self) -> ServoUrl {
         self.url_list.borrow().last().unwrap().clone()
     }
 
@@ -292,20 +302,20 @@ impl Request {
 }
 
 impl Referrer {
-    pub fn to_url(&self) -> Option<&Url> {
+    pub fn to_url(&self) -> Option<&ServoUrl> {
         match *self {
             Referrer::NoReferrer | Referrer::Client => None,
             Referrer::ReferrerUrl(ref url) => Some(url)
         }
     }
-    pub fn from_url(url: Option<Url>) -> Self {
+    pub fn from_url(url: Option<ServoUrl>) -> Self {
         if let Some(url) = url {
             Referrer::ReferrerUrl(url)
         } else {
             Referrer::NoReferrer
         }
     }
-    pub fn take(&mut self) -> Option<Url> {
+    pub fn take(&mut self) -> Option<ServoUrl> {
         let mut new = Referrer::Client;
         swap(self, &mut new);
         match new {

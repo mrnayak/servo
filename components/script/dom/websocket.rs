@@ -33,15 +33,17 @@ use net_traits::CoreResourceMsg::{SetCookiesForUrl, WebsocketConnect};
 use net_traits::MessageData;
 use net_traits::hosts::replace_hosts;
 use net_traits::unwrap_websocket_protocol;
-use script_runtime::{CommonScriptMsg, ScriptChan};
+use script_runtime::CommonScriptMsg;
 use script_runtime::ScriptThreadEventCategory::WebSocketEvent;
-use script_thread::Runnable;
+use script_thread::{Runnable, RunnableWrapper};
+use servo_url::ServoUrl;
 use std::ascii::AsciiExt;
 use std::borrow::ToOwned;
 use std::cell::Cell;
 use std::ptr;
 use std::thread;
-use websocket::client::request::Url;
+use task_source::TaskSource;
+use task_source::networking::NetworkingTaskSource;
 use websocket::header::{Headers, WebSocketProtocol};
 use websocket::ws::util::url::parse_url;
 
@@ -141,7 +143,8 @@ mod close_code {
 }
 
 pub fn close_the_websocket_connection(address: Trusted<WebSocket>,
-                                      sender: Box<ScriptChan>,
+                                      task_source: &NetworkingTaskSource,
+                                      wrapper: &RunnableWrapper,
                                       code: Option<u16>,
                                       reason: String) {
     let close_task = box CloseTask {
@@ -150,23 +153,25 @@ pub fn close_the_websocket_connection(address: Trusted<WebSocket>,
         code: code,
         reason: Some(reason),
     };
-    sender.send(CommonScriptMsg::RunnableMsg(WebSocketEvent, close_task)).unwrap();
+    task_source.queue_with_wrapper(close_task, &wrapper).unwrap();
 }
 
-pub fn fail_the_websocket_connection(address: Trusted<WebSocket>, sender: Box<ScriptChan>) {
+pub fn fail_the_websocket_connection(address: Trusted<WebSocket>,
+                                     task_source: &NetworkingTaskSource,
+                                     wrapper: &RunnableWrapper) {
     let close_task = box CloseTask {
         address: address,
         failed: true,
         code: Some(close_code::ABNORMAL),
         reason: None,
     };
-    sender.send(CommonScriptMsg::RunnableMsg(WebSocketEvent, close_task)).unwrap();
+    task_source.queue_with_wrapper(close_task, &wrapper).unwrap();
 }
 
 #[dom_struct]
 pub struct WebSocket {
     eventtarget: EventTarget,
-    url: Url,
+    url: ServoUrl,
     ready_state: Cell<WebSocketRequestState>,
     buffered_amount: Cell<u64>,
     clearing_buffer: Cell<bool>, //Flag to tell if there is a running thread to clear buffered_amount
@@ -177,7 +182,7 @@ pub struct WebSocket {
 }
 
 impl WebSocket {
-    fn new_inherited(url: Url) -> WebSocket {
+    fn new_inherited(url: ServoUrl) -> WebSocket {
         WebSocket {
             eventtarget: EventTarget::new_inherited(),
             url: url,
@@ -190,7 +195,7 @@ impl WebSocket {
         }
     }
 
-    fn new(global: &GlobalScope, url: Url) -> Root<WebSocket> {
+    fn new(global: &GlobalScope, url: ServoUrl) -> Root<WebSocket> {
         reflect_dom_object(box WebSocket::new_inherited(url),
                            global, WebSocketBinding::Wrap)
     }
@@ -200,10 +205,10 @@ impl WebSocket {
                        protocols: Option<StringOrStringSequence>)
                        -> Fallible<Root<WebSocket>> {
         // Step 1.
-        let resource_url = try!(Url::parse(&url).map_err(|_| Error::Syntax));
+        let resource_url = try!(ServoUrl::parse(&url).map_err(|_| Error::Syntax));
         // Although we do this replace and parse operation again in the resource thread,
         // we try here to be able to immediately throw a syntax error on failure.
-        let _ = try!(parse_url(&replace_hosts(&resource_url)).map_err(|_| Error::Syntax));
+        let _ = try!(parse_url(&replace_hosts(&resource_url).as_url().unwrap()).map_err(|_| Error::Syntax));
         // Step 2: Disallow https -> ws connections.
 
         // Step 3: Potentially block access to some ports.
@@ -268,7 +273,8 @@ impl WebSocket {
         *ws.sender.borrow_mut() = Some(dom_action_sender);
 
         let moved_address = address.clone();
-        let sender = global.networking_task_source();
+        let task_source = global.networking_task_source();
+        let wrapper = global.get_runnable_wrapper();
         thread::spawn(move || {
             while let Ok(event) = dom_event_receiver.recv() {
                 match event {
@@ -278,20 +284,22 @@ impl WebSocket {
                             headers: headers,
                             protocols: protocols,
                         };
-                        sender.send(CommonScriptMsg::RunnableMsg(WebSocketEvent, open_thread)).unwrap();
+                        task_source.queue_with_wrapper(open_thread, &wrapper).unwrap();
                     },
                     WebSocketNetworkEvent::MessageReceived(message) => {
                         let message_thread = box MessageReceivedTask {
                             address: moved_address.clone(),
                             message: message,
                         };
-                        sender.send(CommonScriptMsg::RunnableMsg(WebSocketEvent, message_thread)).unwrap();
+                        task_source.queue_with_wrapper(message_thread, &wrapper).unwrap();
                     },
                     WebSocketNetworkEvent::Fail => {
-                        fail_the_websocket_connection(moved_address.clone(), sender.clone());
+                        fail_the_websocket_connection(moved_address.clone(),
+                            &task_source, &wrapper);
                     },
                     WebSocketNetworkEvent::Close(code, reason) => {
-                        close_the_websocket_connection(moved_address.clone(), sender.clone(), code, reason);
+                        close_the_websocket_connection(moved_address.clone(),
+                            &task_source, &wrapper, code, reason);
                     },
                 }
             }
@@ -436,8 +444,8 @@ impl WebSocketMethods for WebSocket {
                 self.ready_state.set(WebSocketRequestState::Closing);
 
                 let address = Trusted::new(self);
-                let sender = self.global().networking_task_source();
-                fail_the_websocket_connection(address, sender);
+                let task_source = self.global().networking_task_source();
+                fail_the_websocket_connection(address, &task_source, &self.global().get_runnable_wrapper());
             }
             WebSocketRequestState::Open => {
                 self.ready_state.set(WebSocketRequestState::Closing);
@@ -470,8 +478,8 @@ impl Runnable for ConnectionEstablishedTask {
 
         // Step 1: Protocols.
         if !self.protocols.is_empty() && self.headers.get::<WebSocketProtocol>().is_none() {
-            let sender = ws.global().networking_task_source();
-            fail_the_websocket_connection(self.address, sender);
+            let task_source = ws.global().networking_task_source();
+            fail_the_websocket_connection(self.address, &task_source, &ws.global().get_runnable_wrapper());
             return;
         }
 
@@ -498,7 +506,7 @@ impl Runnable for ConnectionEstablishedTask {
         }
 
         // Step 6.
-        ws.upcast().fire_simple_event("open");
+        ws.upcast().fire_event(atom!("open"));
     }
 }
 
@@ -548,7 +556,7 @@ impl Runnable for CloseTask {
 
         // Step 2.
         if self.failed {
-            ws.upcast().fire_simple_event("error");
+            ws.upcast().fire_event(atom!("error"));
         }
 
         // Step 3.

@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use canvas_traits::{CanvasMsg, FromLayoutMsg, CanvasData};
+use canvas_traits::{CanvasMsg, FromScriptMsg};
 use dom::attr::Attr;
 use dom::bindings::cell::DOMRefCell;
 use dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasRenderingContext2DMethods;
@@ -202,16 +202,17 @@ impl HTMLCanvasElement {
 
         let data = if let Some(renderer) = self.ipc_renderer() {
             let (sender, receiver) = ipc::channel().unwrap();
-            let msg = CanvasMsg::FromLayout(FromLayoutMsg::SendData(sender));
+            let msg = CanvasMsg::FromScript(FromScriptMsg::SendPixels(sender));
             renderer.send(msg).unwrap();
 
             match receiver.recv().unwrap() {
-                CanvasData::Pixels(pixel_data)
-                    => pixel_data.image_data.to_vec(),
-                CanvasData::WebGL(_)
-                    // TODO(emilio): Not sure if WebGL canvas is required for 2d spec,
-                    // but I think it's not.
-                    => return None,
+                Some(pixels) => pixels,
+                None => {
+                    // TODO(emilio, #14109): Not sure if WebGL canvas is
+                    // required for 2d spec, but I think it's not, if so, make
+                    // this return a readback from the GL context.
+                    return None;
+                }
             }
         } else {
             repeat(0xffu8).take((size.height as usize) * (size.width as usize) * 4).collect()
@@ -234,8 +235,9 @@ impl HTMLCanvasElementMethods for HTMLCanvasElement {
     // https://html.spec.whatwg.org/multipage/#dom-canvas-height
     make_uint_setter!(SetHeight, "height", DEFAULT_HEIGHT);
 
+    #[allow(unsafe_code)]
     // https://html.spec.whatwg.org/multipage/#dom-canvas-getcontext
-    fn GetContext(&self,
+    unsafe fn GetContext(&self,
                   cx: *mut JSContext,
                   id: DOMString,
                   attributes: Vec<HandleValue>)
@@ -253,8 +255,9 @@ impl HTMLCanvasElementMethods for HTMLCanvasElement {
         }
     }
 
+    #[allow(unsafe_code)]
     // https://html.spec.whatwg.org/multipage/#dom-canvas-todataurl
-    fn ToDataURL(&self,
+    unsafe fn ToDataURL(&self,
                  _context: *mut JSContext,
                  _mime_type: Option<DOMString>,
                  _arguments: Vec<HandleValue>) -> Fallible<DOMString> {
@@ -338,12 +341,12 @@ pub mod utils {
     use dom::window::Window;
     use ipc_channel::ipc;
     use net_traits::image_cache_thread::{ImageCacheChan, ImageResponse};
-    use url::Url;
+    use servo_url::ServoUrl;
 
-    pub fn request_image_from_cache(window: &Window, url: Url) -> ImageResponse {
+    pub fn request_image_from_cache(window: &Window, url: ServoUrl) -> ImageResponse {
         let image_cache = window.image_cache_thread();
         let (response_chan, response_port) = ipc::channel().unwrap();
-        image_cache.request_image(url, ImageCacheChan(response_chan), None);
+        image_cache.request_image(url.into(), ImageCacheChan(response_chan), None);
         let result = response_port.recv().unwrap();
         result.image_response
     }

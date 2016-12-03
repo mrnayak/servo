@@ -4,16 +4,14 @@
 
 use animation::Animation;
 use atomic_refcell::{AtomicRef, AtomicRefCell, AtomicRefMut};
-use context::SharedStyleContext;
 use dom::OpaqueNode;
 use euclid::size::TypedSize2D;
 use gecko_bindings::bindings::RawServoStyleSet;
 use gecko_bindings::sugar::ownership::{HasBoxFFI, HasFFI, HasSimpleFFI};
 use media_queries::{Device, MediaType};
 use num_cpus;
-use parallel::WorkQueueData;
 use parking_lot::RwLock;
-use selector_matching::Stylist;
+use rayon;
 use std::cmp;
 use std::collections::HashMap;
 use std::env;
@@ -21,8 +19,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use style_traits::ViewportPx;
 use stylesheets::Stylesheet;
-use thread_state;
-use workqueue::WorkQueue;
+use stylist::Stylist;
 
 pub struct PerDocumentStyleDataImpl {
     /// Rule processor.
@@ -41,7 +38,7 @@ pub struct PerDocumentStyleDataImpl {
     pub expired_animations: Arc<RwLock<HashMap<OpaqueNode, Vec<Animation>>>>,
 
     // FIXME(bholley): This shouldn't be per-document.
-    pub work_queue: Option<WorkQueue<SharedStyleContext, WorkQueueData>>,
+    pub work_queue: Option<rayon::ThreadPool>,
 
     pub num_threads: usize,
 }
@@ -76,7 +73,9 @@ impl PerDocumentStyleData {
             work_queue: if *NUM_THREADS <= 1 {
                 None
             } else {
-                WorkQueue::new("StyleWorker", thread_state::LAYOUT, *NUM_THREADS).ok()
+                let configuration =
+                    rayon::Configuration::new().set_num_threads(*NUM_THREADS);
+                rayon::ThreadPool::new(configuration).ok()
             },
             num_threads: *NUM_THREADS,
         }))
@@ -112,8 +111,6 @@ unsafe impl HasBoxFFI for PerDocumentStyleData {}
 
 impl Drop for PerDocumentStyleDataImpl {
     fn drop(&mut self) {
-        if let Some(ref mut queue) = self.work_queue {
-            queue.shutdown();
-        }
+        let _ = self.work_queue.take();
     }
 }

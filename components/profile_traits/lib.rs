@@ -13,12 +13,15 @@
 #![deny(unsafe_code)]
 
 extern crate ipc_channel;
+#[macro_use]
+extern crate log;
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;
 extern crate signpost;
 extern crate util;
 
+#[allow(unsafe_code)]
 pub mod energy;
 pub mod mem;
 pub mod time;

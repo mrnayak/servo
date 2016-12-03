@@ -15,6 +15,12 @@ test(function (){
 }, "Test: Asserts ServiceWorkerContainer in Navigator");
 
 promise_test(function() {
+  return register_sw('resources/sw.js').then(function(sw_reg) {
+    assert_equals(sw_reg.active.scriptURL, location.href.replace("service-worker-registration.html", "resources/sw.js"));
+  });
+}, "Test: Active Service Worker ScriptURL property");
+
+promise_test(function() {
   return register_sw('sw.js').then(function(sw_reg) {
     assert_class_string(sw_reg, "ServiceWorkerRegistration");
     assert_class_string(sw_reg.active, "ServiceWorker");
@@ -36,17 +42,11 @@ promise_test(function() {
 }, "Test: Service Worker Registration property scope when provided a scope");
 
 promise_test(function (p) {
-  promise_rejects(p, new TypeError(), register_sw('./in%5Csome%5fdir/sw.js'));
+  return promise_rejects(p, new TypeError(), register_sw('./in%5Csome%5fdir/sw.js'));
 }, "Test: Throws Error when Invalid Url Path");
 
 promise_test(function (p) {
   return promise_rejects(p, new TypeError(), register_sw('sw.js', './mal%5fformed/sco%5Cpe/'));
 }, "Test: Throws Error when Invalid Scope");
-
-promise_test(function() {
-  return register_sw('resources/sw.js').then(function(sw_reg) {
-    assert_equals(sw_reg.active.scriptURL, location.href.replace("service-worker-registration.html", "resources/sw.js"));
-  });
-}, "Test: Active Service Worker ScriptURL property");
 
 </script>

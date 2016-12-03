@@ -36,16 +36,17 @@ use script_runtime::{ScriptPort, maybe_take_panic_result};
 use script_thread::{MainThreadScriptChan, RunnableWrapper, ScriptThread};
 use script_traits::{MsDuration, ScriptMsg as ConstellationMsg, TimerEvent};
 use script_traits::{TimerEventId, TimerEventRequest, TimerSource};
+use servo_url::ServoUrl;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::ffi::CString;
 use std::panic;
 use task_source::file_reading::FileReadingTaskSource;
+use task_source::networking::NetworkingTaskSource;
 use time::{Timespec, get_time};
 use timers::{IsInterval, OneshotTimerCallback, OneshotTimerHandle};
 use timers::{OneshotTimers, TimerCallback};
-use url::Url;
 
 #[dom_struct]
 pub struct GlobalScope {
@@ -238,7 +239,7 @@ impl GlobalScope {
 
     /// Get the [base url](https://html.spec.whatwg.org/multipage/#api-base-url)
     /// for this global scope.
-    pub fn api_base_url(&self) -> Url {
+    pub fn api_base_url(&self) -> ServoUrl {
         if let Some(window) = self.downcast::<Window>() {
             // https://html.spec.whatwg.org/multipage/#script-settings-for-browsing-contexts:api-base-url
             return window.Document().base_url();
@@ -251,7 +252,7 @@ impl GlobalScope {
     }
 
     /// Get the URL for this global scope.
-    pub fn get_url(&self) -> Url {
+    pub fn get_url(&self) -> ServoUrl {
         if let Some(window) = self.downcast::<Window>() {
             return window.get_url();
         }
@@ -325,12 +326,12 @@ impl GlobalScope {
 
     /// `ScriptChan` to send messages to the networking task source of
     /// this of this global scope.
-    pub fn networking_task_source(&self) -> Box<ScriptChan + Send> {
+    pub fn networking_task_source(&self) -> NetworkingTaskSource {
         if let Some(window) = self.downcast::<Window>() {
             return window.networking_task_source();
         }
         if let Some(worker) = self.downcast::<WorkerGlobalScope>() {
-            return worker.script_chan();
+            return worker.networking_task_source();
         }
         unreachable!();
     }

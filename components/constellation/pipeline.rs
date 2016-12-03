@@ -2,9 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+use bluetooth_traits::BluetoothRequest;
 use compositing::CompositionPipeline;
 use compositing::CompositorProxy;
 use compositing::compositor_thread::Msg as CompositorMsg;
+use constellation::ScriptChan;
 use devtools_traits::{DevtoolsControlMsg, ScriptToDevtoolsControlMsg};
 use euclid::scale_factor::ScaleFactor;
 use euclid::size::TypedSize2D;
@@ -17,7 +19,6 @@ use ipc_channel::router::ROUTER;
 use layout_traits::LayoutThreadFactory;
 use msg::constellation_msg::{FrameId, FrameType, PipelineId, PipelineNamespaceId};
 use net_traits::{IpcSend, ResourceThreads};
-use net_traits::bluetooth_thread::BluetoothMethodMsg;
 use net_traits::image_cache_thread::ImageCacheThread;
 use profile_traits::mem as profile_mem;
 use profile_traits::time;
@@ -25,14 +26,15 @@ use script_traits::{ConstellationControlMsg, InitialScriptState};
 use script_traits::{LayoutControlMsg, LayoutMsg, LoadData, MozBrowserEvent};
 use script_traits::{NewLayoutInfo, SWManagerMsg, SWManagerSenders, ScriptMsg};
 use script_traits::{ScriptThreadFactory, TimerEventRequest, WindowSizeData};
+use servo_url::ServoUrl;
 use std::collections::HashMap;
 use std::env;
 use std::ffi::OsStr;
 use std::io::Error as IOError;
 use std::process;
+use std::rc::Rc;
 use std::sync::mpsc::Sender;
 use style_traits::{PagePx, ViewportPx};
-use url::Url;
 use util::opts::{self, Opts};
 use util::prefs::{PREFS, Pref};
 use webrender_traits;
@@ -50,13 +52,13 @@ pub struct Pipeline {
     /// The ID of the frame that contains this Pipeline.
     pub frame_id: FrameId,
     pub parent_info: Option<(PipelineId, FrameType)>,
-    pub script_chan: IpcSender<ConstellationControlMsg>,
+    pub script_chan: Rc<ScriptChan>,
     /// A channel to layout, for performing reflows and shutdown.
     pub layout_chan: IpcSender<LayoutControlMsg>,
     /// A channel to the compositor.
     pub compositor_proxy: Box<CompositorProxy + 'static + Send>,
     /// URL corresponding to the most recently-loaded page.
-    pub url: Url,
+    pub url: ServoUrl,
     /// The title of the most recently-loaded page.
     pub title: Option<String>,
     pub size: Option<TypedSize2D<f32, PagePx>>,
@@ -69,9 +71,6 @@ pub struct Pipeline {
     /// Whether this pipeline should be treated as visible for the purposes of scheduling and
     /// resource management.
     pub visible: bool,
-    /// Whether this pipeline is has matured or not.
-    /// A pipeline is considered mature when it has an associated frame.
-    pub is_mature: bool,
 }
 
 /// Initial setup data needed to construct a pipeline.
@@ -83,6 +82,8 @@ pub struct InitialPipelineState {
     pub id: PipelineId,
     /// The ID of the frame that contains this Pipeline.
     pub frame_id: FrameId,
+    /// The ID of the top-level frame that contains this Pipeline.
+    pub top_level_frame_id: FrameId,
     /// The ID of the parent pipeline and frame type, if any.
     /// If `None`, this is the root.
     pub parent_info: Option<(PipelineId, FrameType)>,
@@ -97,7 +98,7 @@ pub struct InitialPipelineState {
     /// A channel to the developer tools, if applicable.
     pub devtools_chan: Option<Sender<DevtoolsControlMsg>>,
     /// A channel to the bluetooth thread.
-    pub bluetooth_thread: IpcSender<BluetoothMethodMsg>,
+    pub bluetooth_thread: IpcSender<BluetoothRequest>,
     /// A channel to the service worker manager thread
     pub swmanager_thread: IpcSender<SWManagerMsg>,
     /// A channel to the image cache thread.
@@ -116,7 +117,7 @@ pub struct InitialPipelineState {
     pub device_pixel_ratio: ScaleFactor<f32, ViewportPx, DevicePixel>,
     /// A channel to the script thread, if applicable. If this is `Some`,
     /// then `parent_info` must also be `Some`.
-    pub script_chan: Option<IpcSender<ConstellationControlMsg>>,
+    pub script_chan: Option<Rc<ScriptChan>>,
     /// Information about the page to load.
     pub load_data: LoadData,
     /// The ID of the pipeline namespace for this script thread.
@@ -152,6 +153,7 @@ impl Pipeline {
                 let new_layout_info = NewLayoutInfo {
                     parent_pipeline_id: parent_pipeline_id,
                     new_pipeline_id: state.id,
+                    frame_id: state.frame_id,
                     frame_type: frame_type,
                     load_data: state.load_data.clone(),
                     pipeline_port: pipeline_port,
@@ -167,7 +169,7 @@ impl Pipeline {
             }
             None => {
                 let (script_chan, script_port) = ipc::channel().expect("Pipeline script chan");
-                (script_chan, Some((script_port, pipeline_port)))
+                (ScriptChan::new(script_chan), Some((script_port, pipeline_port)))
             }
         };
 
@@ -203,6 +205,8 @@ impl Pipeline {
 
             let unprivileged_pipeline_content = UnprivilegedPipelineContent {
                 id: state.id,
+                frame_id: state.frame_id,
+                top_level_frame_id: state.top_level_frame_id,
                 parent_info: state.parent_info,
                 constellation_chan: state.constellation_chan,
                 scheduler_chan: state.scheduler_chan,
@@ -216,7 +220,7 @@ impl Pipeline {
                 mem_profiler_chan: state.mem_profiler_chan,
                 window_size: window_size,
                 layout_to_constellation_chan: state.layout_to_constellation_chan,
-                script_chan: script_chan.clone(),
+                script_chan: script_chan.sender(),
                 load_data: state.load_data.clone(),
                 script_port: script_port,
                 opts: (*opts::get()).clone(),
@@ -259,11 +263,11 @@ impl Pipeline {
     fn new(id: PipelineId,
            frame_id: FrameId,
            parent_info: Option<(PipelineId, FrameType)>,
-           script_chan: IpcSender<ConstellationControlMsg>,
+           script_chan: Rc<ScriptChan>,
            layout_chan: IpcSender<LayoutControlMsg>,
            compositor_proxy: Box<CompositorProxy + 'static + Send>,
            is_private: bool,
-           url: Url,
+           url: ServoUrl,
            size: Option<TypedSize2D<f32, PagePx>>,
            visible: bool)
            -> Pipeline {
@@ -281,7 +285,6 @@ impl Pipeline {
             running_animations: false,
             visible: visible,
             is_private: is_private,
-            is_mature: false,
         }
     }
 
@@ -331,7 +334,7 @@ impl Pipeline {
     pub fn to_sendable(&self) -> CompositionPipeline {
         CompositionPipeline {
             id: self.id.clone(),
-            script_chan: self.script_chan.clone(),
+            script_chan: self.script_chan.sender(),
             layout_chan: self.layout_chan.clone(),
         }
     }
@@ -348,7 +351,7 @@ impl Pipeline {
     }
 
     pub fn trigger_mozbrowser_event(&self,
-                                     child_id: Option<PipelineId>,
+                                     child_id: Option<FrameId>,
                                      event: MozBrowserEvent) {
         assert!(PREFS.is_mozbrowser_enabled());
 
@@ -380,12 +383,14 @@ impl Pipeline {
 #[derive(Deserialize, Serialize)]
 pub struct UnprivilegedPipelineContent {
     id: PipelineId,
+    frame_id: FrameId,
+    top_level_frame_id: FrameId,
     parent_info: Option<(PipelineId, FrameType)>,
     constellation_chan: IpcSender<ScriptMsg>,
     layout_to_constellation_chan: IpcSender<LayoutMsg>,
     scheduler_chan: IpcSender<TimerEventRequest>,
     devtools_chan: Option<IpcSender<ScriptToDevtoolsControlMsg>>,
-    bluetooth_thread: IpcSender<BluetoothMethodMsg>,
+    bluetooth_thread: IpcSender<BluetoothRequest>,
     swmanager_thread: IpcSender<SWManagerMsg>,
     image_cache_thread: ImageCacheThread,
     font_cache_thread: FontCacheThread,
@@ -414,6 +419,8 @@ impl UnprivilegedPipelineContent {
     {
         let layout_pair = STF::create(InitialScriptState {
             id: self.id,
+            frame_id: self.frame_id,
+            top_level_frame_id: self.top_level_frame_id,
             parent_info: self.parent_info,
             control_chan: self.script_chan.clone(),
             control_port: self.script_port,
@@ -431,6 +438,7 @@ impl UnprivilegedPipelineContent {
         }, self.load_data.clone());
 
         LTF::create(self.id,
+                    Some(self.top_level_frame_id),
                     self.load_data.url,
                     self.parent_info.is_some(),
                     layout_pair,

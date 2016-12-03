@@ -2,24 +2,25 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use cssparser::{self, Parser, SourcePosition};
+use cssparser::{self, Parser as CssParser, SourcePosition};
 use html5ever_atoms::{Namespace as NsAtom};
 use media_queries::CSSErrorReporterTest;
 use parking_lot::RwLock;
 use selectors::parser::*;
 use servo_atoms::Atom;
+use servo_url::ServoUrl;
 use std::borrow::ToOwned;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 use style::error_reporting::ParseErrorReporter;
 use style::keyframes::{Keyframe, KeyframeSelector, KeyframePercentage};
 use style::parser::ParserContextExtraData;
 use style::properties::{PropertyDeclaration, PropertyDeclarationBlock, DeclaredValue, longhands};
 use style::properties::Importance;
 use style::properties::longhands::animation_play_state;
-use style::stylesheets::{Stylesheet, NamespaceRule, CSSRule, StyleRule, KeyframesRule, Origin};
+use style::stylesheets::{Stylesheet, NamespaceRule, CssRule, StyleRule, KeyframesRule, Origin};
 use style::values::specified::{LengthOrPercentageOrAuto, Percentage};
-use url::Url;
 
 #[test]
 fn test_parse_stylesheet() {
@@ -48,21 +49,21 @@ fn test_parse_stylesheet() {
                 animation-play-state: running; /* … except animation-play-state */
             }
         }";
-    let url = Url::parse("about::test").unwrap();
-    let stylesheet = Stylesheet::from_str(css, url, Origin::UserAgent,
+    let url = ServoUrl::parse("about::test").unwrap();
+    let stylesheet = Stylesheet::from_str(css, url, Origin::UserAgent, Default::default(),
                                           Box::new(CSSErrorReporterTest),
                                           ParserContextExtraData::default());
     let expected = Stylesheet {
         origin: Origin::UserAgent,
-        media: None,
-        dirty_on_viewport_size_change: false,
+        media: Default::default(),
+        dirty_on_viewport_size_change: AtomicBool::new(false),
         rules: vec![
-            CSSRule::Namespace(Arc::new(RwLock::new(NamespaceRule {
+            CssRule::Namespace(Arc::new(RwLock::new(NamespaceRule {
                 prefix: None,
                 url: NsAtom::from("http://www.w3.org/1999/xhtml")
             }))),
-            CSSRule::Style(Arc::new(RwLock::new(StyleRule {
-                selectors: vec![
+            CssRule::Style(Arc::new(RwLock::new(StyleRule {
+                selectors: SelectorList(vec![
                     Selector {
                         complex_selector: Arc::new(ComplexSelector {
                             compound_selector: vec![
@@ -88,7 +89,7 @@ fn test_parse_stylesheet() {
                         pseudo_element: None,
                         specificity: (0 << 20) + (1 << 10) + (1 << 0),
                     },
-                ],
+                ]),
                 block: Arc::new(RwLock::new(PropertyDeclarationBlock {
                     declarations: vec![
                         (PropertyDeclaration::Display(DeclaredValue::Value(
@@ -100,8 +101,8 @@ fn test_parse_stylesheet() {
                     important_count: 2,
                 })),
             }))),
-            CSSRule::Style(Arc::new(RwLock::new(StyleRule {
-                selectors: vec![
+            CssRule::Style(Arc::new(RwLock::new(StyleRule {
+                selectors: SelectorList(vec![
                     Selector {
                         complex_selector: Arc::new(ComplexSelector {
                             compound_selector: vec![
@@ -136,7 +137,7 @@ fn test_parse_stylesheet() {
                         pseudo_element: None,
                         specificity: (0 << 20) + (0 << 10) + (1 << 0),
                     },
-                ],
+                ]),
                 block: Arc::new(RwLock::new(PropertyDeclarationBlock {
                     declarations: vec![
                         (PropertyDeclaration::Display(DeclaredValue::Value(
@@ -146,8 +147,8 @@ fn test_parse_stylesheet() {
                     important_count: 0,
                 })),
             }))),
-            CSSRule::Style(Arc::new(RwLock::new(StyleRule {
-                selectors: vec![
+            CssRule::Style(Arc::new(RwLock::new(StyleRule {
+                selectors: SelectorList(vec![
                     Selector {
                         complex_selector: Arc::new(ComplexSelector {
                             compound_selector: vec![
@@ -171,7 +172,7 @@ fn test_parse_stylesheet() {
                         pseudo_element: None,
                         specificity: (1 << 20) + (1 << 10) + (0 << 0),
                     },
-                ],
+                ]),
                 block: Arc::new(RwLock::new(PropertyDeclarationBlock {
                     declarations: vec![
                         (PropertyDeclaration::BackgroundColor(DeclaredValue::Value(
@@ -222,7 +223,7 @@ fn test_parse_stylesheet() {
                     important_count: 0,
                 })),
             }))),
-            CSSRule::Keyframes(Arc::new(RwLock::new(KeyframesRule {
+            CssRule::Keyframes(Arc::new(RwLock::new(KeyframesRule {
                 name: "foo".into(),
                 keyframes: vec![
                     Arc::new(RwLock::new(Keyframe {
@@ -256,7 +257,7 @@ fn test_parse_stylesheet() {
                 ]
             })))
 
-        ],
+        ].into(),
     };
 
     assert_eq!(format!("{:#?}", stylesheet), format!("{:#?}", expected));
@@ -281,7 +282,7 @@ impl CSSInvalidErrorReporterTest {
 }
 
 impl ParseErrorReporter for CSSInvalidErrorReporterTest {
-    fn report_error(&self, input: &mut Parser, position: SourcePosition, message: &str) {
+    fn report_error(&self, input: &mut CssParser, position: SourcePosition, message: &str) {
         let location = input.source_location(position);
 
         let errors = self.errors.clone();
@@ -315,12 +316,12 @@ fn test_report_error_stylesheet() {
         invalid: true;
     }
     ";
-    let url = Url::parse("about::test").unwrap();
+    let url = ServoUrl::parse("about::test").unwrap();
     let error_reporter = Box::new(CSSInvalidErrorReporterTest::new());
 
     let errors = error_reporter.errors.clone();
 
-    Stylesheet::from_str(css, url, Origin::UserAgent, error_reporter,
+    Stylesheet::from_str(css, url, Origin::UserAgent, Default::default(), error_reporter,
                          ParserContextExtraData::default());
 
     let mut errors = errors.lock().unwrap();

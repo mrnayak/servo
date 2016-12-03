@@ -14,6 +14,7 @@ use dom::bindings::js::{JS, MutNullableHeap, Root, RootedReference};
 use dom::bindings::refcounted::Trusted;
 use dom::bindings::reflector::Reflectable;
 use dom::bindings::str::DOMString;
+use dom::cssstylesheet::CSSStyleSheet;
 use dom::document::Document;
 use dom::domtokenlist::DOMTokenList;
 use dom::element::{AttributeMutation, Element, ElementCreator};
@@ -30,12 +31,12 @@ use hyper::mime::{Mime, TopLevel, SubLevel};
 use hyper_serde::Serde;
 use ipc_channel::ipc;
 use ipc_channel::router::ROUTER;
-use msg::constellation_msg::ReferrerPolicy;
-use net_traits::{FetchResponseListener, FetchMetadata, Metadata, NetworkError};
+use net_traits::{FetchResponseListener, FetchMetadata, Metadata, NetworkError, ReferrerPolicy};
 use net_traits::request::{CredentialsMode, Destination, RequestInit, Type as RequestType};
 use network_listener::{NetworkListener, PreInvoke};
 use script_layout_interface::message::Msg;
 use script_traits::{MozBrowserEvent, ScriptMsg as ConstellationMsg};
+use servo_url::ServoUrl;
 use std::ascii::AsciiExt;
 use std::borrow::ToOwned;
 use std::cell::Cell;
@@ -43,11 +44,10 @@ use std::default::Default;
 use std::mem;
 use std::sync::{Arc, Mutex};
 use style::attr::AttrValue;
-use style::media_queries::{MediaQueryList, parse_media_query_list};
+use style::media_queries::{MediaList, parse_media_query_list};
 use style::parser::ParserContextExtraData;
 use style::str::HTML_SPACE_CHARACTERS;
 use style::stylesheets::{Stylesheet, Origin};
-use url::Url;
 
 no_jsmanaged_fields!(Stylesheet);
 
@@ -57,6 +57,7 @@ pub struct HTMLLinkElement {
     rel_list: MutNullableHeap<JS<DOMTokenList>>,
     #[ignore_heap_size_of = "Arc"]
     stylesheet: DOMRefCell<Option<Arc<Stylesheet>>>,
+    cssom_stylesheet: MutNullableHeap<JS<CSSStyleSheet>>,
 
     /// https://html.spec.whatwg.org/multipage/#a-style-sheet-that-is-blocking-scripts
     parser_inserted: Cell<bool>,
@@ -70,6 +71,7 @@ impl HTMLLinkElement {
             rel_list: Default::default(),
             parser_inserted: Cell::new(creator == ElementCreator::ParserCreated),
             stylesheet: DOMRefCell::new(None),
+            cssom_stylesheet: MutNullableHeap::new(None),
         }
     }
 
@@ -85,6 +87,18 @@ impl HTMLLinkElement {
 
     pub fn get_stylesheet(&self) -> Option<Arc<Stylesheet>> {
         self.stylesheet.borrow().clone()
+    }
+
+    pub fn get_cssom_stylesheet(&self) -> Option<Root<CSSStyleSheet>> {
+        self.get_stylesheet().map(|sheet| {
+            self.cssom_stylesheet.or_init(|| {
+                CSSStyleSheet::new(&window_from_node(self),
+                                   "text/css".into(),
+                                   None, // todo handle location
+                                   None, // todo handle title
+                                   sheet)
+            })
+        })
     }
 }
 
@@ -244,8 +258,8 @@ impl HTMLLinkElement {
         let (action_sender, action_receiver) = ipc::channel().unwrap();
         let listener = NetworkListener {
             context: context,
-            script_chan: document.window().networking_task_source(),
-            wrapper: Some(document.window().get_runnable_wrapper()),
+            task_source: document.window().networking_task_source(),
+            wrapper: Some(document.window().get_runnable_wrapper())
         };
         ROUTER.add_route(action_receiver.to_opaque(), box move |message| {
             listener.notify_fetch(message.to().unwrap());
@@ -266,9 +280,9 @@ impl HTMLLinkElement {
             destination: Destination::Style,
             credentials_mode: CredentialsMode::Include,
             use_url_credentials: true,
-            origin: document.url().clone(),
+            origin: document.url(),
             pipeline_id: Some(self.global().pipeline_id()),
-            referrer_url: Some(document.url().clone()),
+            referrer_url: Some(document.url()),
             referrer_policy: referrer_policy,
             .. RequestInit::default()
         };
@@ -298,13 +312,13 @@ impl HTMLLinkElement {
 struct StylesheetContext {
     /// The element that initiated the request.
     elem: Trusted<HTMLLinkElement>,
-    media: Option<MediaQueryList>,
+    media: Option<MediaList>,
     /// The response body received to date.
     data: Vec<u8>,
     /// The response metadata received to date.
     metadata: Option<Metadata>,
     /// The initial URL requested.
-    url: Url,
+    url: ServoUrl,
 }
 
 impl PreInvoke for StylesheetContext {}
@@ -325,7 +339,7 @@ impl FetchResponseListener for StylesheetContext {
         if let Some(ref meta) = self.metadata {
             if let Some(Serde(ContentType(Mime(TopLevel::Text, SubLevel::Css, _)))) = meta.content_type {
             } else {
-                self.elem.root().upcast::<EventTarget>().fire_simple_event("error");
+                self.elem.root().upcast::<EventTarget>().fire_event(atom!("error"));
             }
         }
     }
@@ -356,13 +370,10 @@ impl FetchResponseListener for StylesheetContext {
 
             let win = window_from_node(&*elem);
 
-            let mut sheet = Stylesheet::from_bytes(&data, final_url, protocol_encoding_label,
-                                                   Some(environment_encoding), Origin::Author,
-                                                   win.css_error_reporter(),
-                                                   ParserContextExtraData::default());
-            let media = self.media.take().unwrap();
-            sheet.set_media(Some(media));
-            let sheet = Arc::new(sheet);
+            let sheet = Arc::new(Stylesheet::from_bytes(
+                &data, final_url, protocol_encoding_label, Some(environment_encoding),
+                Origin::Author, self.media.take().unwrap(), win.css_error_reporter(),
+                ParserContextExtraData::default()));
 
             let win = window_from_node(&*elem);
             win.layout_chan().send(Msg::AddStylesheet(sheet.clone())).unwrap();
@@ -380,9 +391,9 @@ impl FetchResponseListener for StylesheetContext {
 
         document.finish_load(LoadType::Stylesheet(self.url.clone()));
 
-        let event = if successful { "load" } else { "error" };
+        let event = if successful { atom!("load") } else { atom!("error") };
 
-        elem.upcast::<EventTarget>().fire_simple_event(event);
+        elem.upcast::<EventTarget>().fire_event(event);
     }
 }
 

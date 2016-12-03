@@ -11,7 +11,6 @@ path = "lib.rs"
 
 [dependencies]
 app_units = "0.3"
-azure = {git = "https://github.com/servo/rust-azure", features = ["plugins"]}
 bitflags = "0.7"
 canvas_traits = {path = "../canvas_traits"}
 cssparser = {version = "0.7", features = ["heap_size", "serde-serialization"]}
@@ -28,22 +27,24 @@ log = "0.3.5"
 msg = {path = "../msg"}
 net_traits = {path = "../net_traits"}
 ordered-float = "0.2.2"
-parking_lot = {version = "0.3.3", features = ["nightly"]}
+parking_lot = "0.3.3"
 plugins = {path = "../plugins"}
 profile_traits = {path = "../profile_traits"}
 range = {path = "../range"}
-rustc-serialize = "0.3"
+rayon = "0.5"
 script_layout_interface = {path = "../script_layout_interface"}
 script_traits = {path = "../script_traits"}
-selectors = "0.14"
+selectors = "0.15"
+serde = "0.8"
 serde_derive = "0.8"
+serde_json = "0.8"
 servo_atoms = {path = "../atoms"}
+servo_url = {path = "../url"}
 smallvec = "0.1"
 style = {path = "../style"}
 style_traits = {path = "../style_traits"}
 unicode-bidi = "0.2"
 unicode-script = {version = "0.1", features = ["harfbuzz"]}
-url = {version = "1.2", features = ["heap_size"]}
 util = {path = "../util"}
 
 [dependencies.webrender_traits]

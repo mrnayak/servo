@@ -17,13 +17,13 @@ use net_traits::image::base::Image;
 use net_traits::image_cache_thread::{ImageCacheChan, ImageCacheThread, ImageResponse, ImageState};
 use net_traits::image_cache_thread::{ImageOrMetadataAvailable, UsePlaceholder};
 use parking_lot::RwLock;
+use servo_url::ServoUrl;
 use std::cell::{RefCell, RefMut};
 use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use style::context::{LocalStyleContext, StyleContext, SharedStyleContext};
-use url::Url;
 use util::opts;
 
 struct LocalLayoutContext {
@@ -53,9 +53,6 @@ fn create_or_get_local_context(shared_layout_context: &SharedLayoutContext)
     LOCAL_CONTEXT_KEY.with(|r| {
         let mut r = r.borrow_mut();
         if let Some(context) = r.clone() {
-            if shared_layout_context.style_context.screen_size_changed {
-                context.style_context.applicable_declarations_cache.borrow_mut().evict_all();
-            }
             context
         } else {
             let font_cache_thread = shared_layout_context.font_cache_thread.lock().unwrap().clone();
@@ -77,7 +74,7 @@ pub struct SharedLayoutContext {
     pub style_context: SharedStyleContext,
 
     /// The shared image cache thread.
-    pub image_cache_thread: ImageCacheThread,
+    pub image_cache_thread: Mutex<ImageCacheThread>,
 
     /// A channel for the image cache to send responses to.
     pub image_cache_sender: Mutex<ImageCacheChan>,
@@ -86,7 +83,7 @@ pub struct SharedLayoutContext {
     pub font_cache_thread: Mutex<FontCacheThread>,
 
     /// A cache of WebRender image info.
-    pub webrender_image_cache: Arc<RwLock<HashMap<(Url, UsePlaceholder),
+    pub webrender_image_cache: Arc<RwLock<HashMap<(ServoUrl, UsePlaceholder),
                                                   WebRenderImageInfo,
                                                   BuildHasherDefault<FnvHasher>>>>,
 }
@@ -128,12 +125,13 @@ impl<'a> LayoutContext<'a> {
 }
 
 impl SharedLayoutContext {
-    fn get_or_request_image_synchronously(&self, url: Url, use_placeholder: UsePlaceholder)
+    fn get_or_request_image_synchronously(&self, url: ServoUrl, use_placeholder: UsePlaceholder)
                                           -> Option<Arc<Image>> {
         debug_assert!(opts::get().output_file.is_some() || opts::get().exit_after_load);
 
         // See if the image is already available
-        let result = self.image_cache_thread.find_image(url.clone(), use_placeholder);
+        let result = self.image_cache_thread.lock().unwrap()
+                                            .find_image(url.clone(), use_placeholder);
 
         match result {
             Ok(image) => return Some(image),
@@ -147,7 +145,7 @@ impl SharedLayoutContext {
         // If we are emitting an output file, then we need to block on
         // image load or we risk emitting an output file missing the image.
         let (sync_tx, sync_rx) = ipc::channel().unwrap();
-        self.image_cache_thread.request_image(url, ImageCacheChan(sync_tx), None);
+        self.image_cache_thread.lock().unwrap().request_image(url, ImageCacheChan(sync_tx), None);
         loop {
             match sync_rx.recv() {
                 Err(_) => return None,
@@ -163,7 +161,7 @@ impl SharedLayoutContext {
         }
     }
 
-    pub fn get_or_request_image_or_meta(&self, url: Url, use_placeholder: UsePlaceholder)
+    pub fn get_or_request_image_or_meta(&self, url: ServoUrl, use_placeholder: UsePlaceholder)
                                 -> Option<ImageOrMetadataAvailable> {
         // If we are emitting an output file, load the image synchronously.
         if opts::get().output_file.is_some() || opts::get().exit_after_load {
@@ -171,7 +169,8 @@ impl SharedLayoutContext {
                        .map(|img| ImageOrMetadataAvailable::ImageAvailable(img));
         }
         // See if the image is already available
-        let result = self.image_cache_thread.find_image_or_metadata(url.clone(),
+        let result = self.image_cache_thread.lock().unwrap()
+                                            .find_image_or_metadata(url.clone(),
                                                                     use_placeholder);
         match result {
             Ok(image_or_metadata) => Some(image_or_metadata),
@@ -180,7 +179,8 @@ impl SharedLayoutContext {
             // Not yet requested, async mode - request image or metadata from the cache
             Err(ImageState::NotRequested) => {
                 let sender = self.image_cache_sender.lock().unwrap().clone();
-                self.image_cache_thread.request_image_and_metadata(url, sender, None);
+                self.image_cache_thread.lock().unwrap()
+                                       .request_image_and_metadata(url, sender, None);
                 None
             }
             // Image has been requested, is still pending. Return no image for this paint loop.
@@ -190,23 +190,23 @@ impl SharedLayoutContext {
     }
 
     pub fn get_webrender_image_for_url(&self,
-                                       url: &Url,
+                                       url: ServoUrl,
                                        use_placeholder: UsePlaceholder)
                                        -> Option<WebRenderImageInfo> {
         if let Some(existing_webrender_image) = self.webrender_image_cache
                                                     .read()
-                                                    .get(&((*url).clone(), use_placeholder)) {
+                                                    .get(&(url.clone(), use_placeholder)) {
             return Some((*existing_webrender_image).clone())
         }
 
-        match self.get_or_request_image_or_meta((*url).clone(), use_placeholder) {
+        match self.get_or_request_image_or_meta(url.clone(), use_placeholder) {
             Some(ImageOrMetadataAvailable::ImageAvailable(image)) => {
                 let image_info = WebRenderImageInfo::from_image(&*image);
                 if image_info.key.is_none() {
                     Some(image_info)
                 } else {
                     let mut webrender_image_cache = self.webrender_image_cache.write();
-                    webrender_image_cache.insert(((*url).clone(), use_placeholder),
+                    webrender_image_cache.insert((url, use_placeholder),
                                                  image_info);
                     Some(image_info)
                 }

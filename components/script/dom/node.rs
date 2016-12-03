@@ -30,6 +30,7 @@ use dom::bindings::reflector::{Reflectable, reflect_dom_object};
 use dom::bindings::str::{DOMString, USVString};
 use dom::bindings::xmlname::namespace_from_domstring;
 use dom::characterdata::{CharacterData, LayoutCharacterDataHelpers};
+use dom::cssstylesheet::CSSStyleSheet;
 use dom::document::{Document, DocumentSource, IsHTMLDocument};
 use dom::documentfragment::DocumentFragment;
 use dom::documenttype::DocumentType;
@@ -43,11 +44,14 @@ use dom::htmlelement::HTMLElement;
 use dom::htmliframeelement::{HTMLIFrameElement, HTMLIFrameElementLayoutMethods};
 use dom::htmlimageelement::{HTMLImageElement, LayoutHTMLImageElementHelpers};
 use dom::htmlinputelement::{HTMLInputElement, LayoutHTMLInputElementHelpers};
+use dom::htmllinkelement::HTMLLinkElement;
+use dom::htmlmetaelement::HTMLMetaElement;
+use dom::htmlstyleelement::HTMLStyleElement;
 use dom::htmltextareaelement::{HTMLTextAreaElement, LayoutHTMLTextAreaElementHelpers};
 use dom::nodelist::NodeList;
 use dom::processinginstruction::ProcessingInstruction;
 use dom::range::WeakRangeVec;
-use dom::servoparser::html::parse_html_fragment;
+use dom::servoparser::ServoParser;
 use dom::svgsvgelement::{SVGSVGElement, LayoutSVGSVGElementHelpers};
 use dom::text::Text;
 use dom::virtualmethods::{VirtualMethods, vtable_for};
@@ -67,8 +71,8 @@ use script_layout_interface::{LayoutElementType, LayoutNodeType, TrustedNodeAddr
 use script_layout_interface::message::Msg;
 use script_traits::UntrustedNodeAddress;
 use selectors::matching::{MatchingReason, matches};
-use selectors::parser::Selector;
-use selectors::parser::parse_author_origin_selector_list_from_str;
+use selectors::parser::SelectorList;
+use servo_url::ServoUrl;
 use std::borrow::ToOwned;
 use std::cell::{Cell, UnsafeCell};
 use std::cmp::max;
@@ -76,10 +80,11 @@ use std::default::Default;
 use std::iter;
 use std::mem;
 use std::ops::Range;
+use std::sync::Arc;
 use style::dom::OpaqueNode;
-use style::selector_impl::ServoSelectorImpl;
+use style::selector_parser::{SelectorImpl, SelectorParser};
+use style::stylesheets::Stylesheet;
 use style::thread_state;
-use url::Url;
 use uuid::Uuid;
 
 //
@@ -143,8 +148,6 @@ bitflags! {
     pub flags NodeFlags: u8 {
         #[doc = "Specifies whether this node is in a document."]
         const IS_IN_DOC = 0x01,
-        #[doc = "Specifies whether this node _must_ be reflowed regardless of style differences."]
-        const HAS_CHANGED = 0x02,
         #[doc = "Specifies whether this node needs style recalc on next reflow."]
         const IS_DIRTY = 0x04,
         #[doc = "Specifies whether this node has descendants (inclusive of itself) which \
@@ -169,7 +172,7 @@ bitflags! {
 
 impl NodeFlags {
     pub fn new() -> NodeFlags {
-        HAS_CHANGED | IS_DIRTY | HAS_DIRTY_DESCENDANTS
+        IS_DIRTY
     }
 }
 
@@ -245,6 +248,8 @@ impl Node {
         let parent_in_doc = self.is_in_doc();
         for node in new_child.traverse_preorder() {
             node.set_flag(IS_IN_DOC, parent_in_doc);
+            // Out-of-document elements never have the descendants flag set.
+            debug_assert!(!node.get_flag(HAS_DIRTY_DESCENDANTS));
             vtable_for(&&*node).bind_to_tree(parent_in_doc);
         }
         let document = new_child.owner_doc();
@@ -283,7 +288,8 @@ impl Node {
         self.children_count.set(self.children_count.get() - 1);
 
         for node in child.traverse_preorder() {
-            node.set_flag(IS_IN_DOC, false);
+            // Out-of-document elements never have the descendants flag set.
+            node.set_flag(IS_IN_DOC | HAS_DIRTY_DESCENDANTS, false);
             vtable_for(&&*node).unbind_from_tree(&context);
             node.style_and_layout_data.get().map(|d| node.dispose(d));
         }
@@ -298,12 +304,12 @@ impl Node {
 }
 
 pub struct QuerySelectorIterator {
-    selectors: Vec<Selector<ServoSelectorImpl>>,
+    selectors: SelectorList<SelectorImpl>,
     iterator: TreeIterator,
 }
 
 impl<'a> QuerySelectorIterator {
-     fn new(iter: TreeIterator, selectors: Vec<Selector<ServoSelectorImpl>>)
+     fn new(iter: TreeIterator, selectors: SelectorList<SelectorImpl>)
                   -> QuerySelectorIterator {
         QuerySelectorIterator {
             selectors: selectors,
@@ -316,7 +322,7 @@ impl<'a> Iterator for QuerySelectorIterator {
     type Item = Root<Node>;
 
     fn next(&mut self) -> Option<Root<Node>> {
-        let selectors = &self.selectors;
+        let selectors = &self.selectors.0;
         // TODO(cgaebel): Is it worth it to build a bloom filter here
         // (instead of passing `None`)? Probably.
         self.iterator.by_ref().filter_map(|node| {
@@ -422,14 +428,6 @@ impl Node {
         self.flags.set(flags);
     }
 
-    pub fn has_changed(&self) -> bool {
-        self.get_flag(HAS_CHANGED)
-    }
-
-    pub fn set_has_changed(&self, state: bool) {
-        self.set_flag(HAS_CHANGED, state)
-    }
-
     pub fn is_dirty(&self) -> bool {
         self.get_flag(IS_DIRTY)
     }
@@ -446,10 +444,6 @@ impl Node {
         self.set_flag(HAS_DIRTY_DESCENDANTS, state)
     }
 
-    pub fn force_dirty_ancestors(&self, damage: NodeDamage) {
-        self.dirty_impl(damage, true)
-    }
-
     pub fn rev_version(&self) {
         // The new version counter is 1 plus the max of the node's current version counter,
         // its descendants version, and the document's version. Normally, this will just be
@@ -464,30 +458,18 @@ impl Node {
     }
 
     pub fn dirty(&self, damage: NodeDamage) {
-        self.dirty_impl(damage, false)
-    }
-
-    pub fn dirty_impl(&self, damage: NodeDamage, force_ancestors: bool) {
-        // 0. Set version counter
         self.rev_version();
-
-        // 1. Dirty self.
-        match damage {
-            NodeDamage::NodeStyleDamaged => {}
-            NodeDamage::OtherNodeDamage => self.set_has_changed(true),
+        if !self.is_in_doc() {
+            return;
         }
 
-        if self.is_dirty() && !force_ancestors {
-            return
-        }
-
-        self.set_flag(IS_DIRTY, true);
-
-        // 4. Dirty ancestors.
-        for ancestor in self.ancestors() {
-            if !force_ancestors && ancestor.has_dirty_descendants() { break }
-            ancestor.set_has_dirty_descendants(true);
-        }
+        match self.type_id() {
+            NodeTypeId::CharacterData(CharacterDataTypeId::Text) =>
+                self.parent_node.get().unwrap().downcast::<Element>().unwrap().restyle(damage),
+            NodeTypeId::Element(_) =>
+                self.downcast::<Element>().unwrap().restyle(damage),
+            _ => {},
+        };
     }
 
     /// The maximum version number of this node's descendants, including itself
@@ -707,13 +689,13 @@ impl Node {
     // https://dom.spec.whatwg.org/#dom-parentnode-queryselector
     pub fn query_selector(&self, selectors: DOMString) -> Fallible<Option<Root<Element>>> {
         // Step 1.
-        match parse_author_origin_selector_list_from_str(&selectors) {
+        match SelectorParser::parse_author_origin_no_namespace(&selectors) {
             // Step 2.
             Err(()) => Err(Error::Syntax),
             // Step 3.
-            Ok(ref selectors) => {
+            Ok(selectors) => {
                 Ok(self.traverse_preorder().filter_map(Root::downcast).find(|element| {
-                    matches(selectors, element, None, MatchingReason::Other)
+                    matches(&selectors.0, element, None, MatchingReason::Other)
                 }))
             }
         }
@@ -726,7 +708,7 @@ impl Node {
     pub fn query_selector_iter(&self, selectors: DOMString)
                                   -> Fallible<QuerySelectorIterator> {
         // Step 1.
-        match parse_author_origin_selector_list_from_str(&selectors) {
+        match SelectorParser::parse_author_origin_no_namespace(&selectors) {
             // Step 2.
             Err(()) => Err(Error::Syntax),
             // Step 3.
@@ -833,7 +815,7 @@ impl Node {
         let context_document = document_from_node(self);
         let fragment = DocumentFragment::new(&context_document);
         if context_document.is_html_document() {
-            parse_html_fragment(self.upcast(), markup, fragment.upcast());
+            ServoParser::parse_html_fragment(self.upcast(), markup, fragment.upcast());
         } else {
             // FIXME: XML case
             unimplemented!();
@@ -853,22 +835,23 @@ impl Node {
 
         let tr = new_child();
 
-        let after_node = if index == -1 {
-            None
-        } else {
-            match get_items().elements_iter()
-                             .map(Root::upcast::<Node>)
-                             .map(Some)
-                             .chain(iter::once(None))
-                             .nth(index as usize) {
-                None => return Err(Error::IndexSize),
-                Some(node) => node,
-            }
-        };
 
         {
             let tr_node = tr.upcast::<Node>();
-            try!(self.InsertBefore(tr_node, after_node.r()));
+            if index == -1 {
+                try!(self.InsertBefore(tr_node, None));
+            } else {
+                let items = get_items();
+                let node = match items.elements_iter()
+                                      .map(Root::upcast::<Node>)
+                                      .map(Some)
+                                      .chain(iter::once(None))
+                                      .nth(index as usize) {
+                    None => return Err(Error::IndexSize),
+                    Some(node) => node,
+                };
+                try!(self.InsertBefore(tr_node, node.r()));
+            }
         }
 
         Ok(Root::upcast::<HTMLElement>(tr))
@@ -899,6 +882,30 @@ impl Node {
 
         element.upcast::<Node>().remove_self();
         Ok(())
+    }
+
+    pub fn get_stylesheet(&self) -> Option<Arc<Stylesheet>> {
+        if let Some(node) = self.downcast::<HTMLStyleElement>() {
+            node.get_stylesheet()
+        } else if let Some(node) = self.downcast::<HTMLLinkElement>() {
+            node.get_stylesheet()
+        } else if let Some(node) = self.downcast::<HTMLMetaElement>() {
+            node.get_stylesheet()
+        } else {
+            None
+        }
+    }
+
+    pub fn get_cssom_stylesheet(&self) -> Option<Root<CSSStyleSheet>> {
+        if let Some(node) = self.downcast::<HTMLStyleElement>() {
+            node.get_cssom_stylesheet()
+        } else if let Some(node) = self.downcast::<HTMLLinkElement>() {
+            node.get_cssom_stylesheet()
+        } else if let Some(node) = self.downcast::<HTMLMetaElement>() {
+            node.get_cssom_stylesheet()
+        } else {
+            None
+        }
     }
 }
 
@@ -960,7 +967,7 @@ pub trait LayoutNodeHelpers {
 
     fn text_content(&self) -> String;
     fn selection(&self) -> Option<Range<usize>>;
-    fn image_url(&self) -> Option<Url>;
+    fn image_url(&self) -> Option<ServoUrl>;
     fn canvas_data(&self) -> Option<HTMLCanvasData>;
     fn svg_data(&self) -> Option<SVGSVGData>;
     fn iframe_pipeline_id(&self) -> PipelineId;
@@ -1095,7 +1102,7 @@ impl LayoutNodeHelpers for LayoutJS<Node> {
     }
 
     #[allow(unsafe_code)]
-    fn image_url(&self) -> Option<Url> {
+    fn image_url(&self) -> Option<ServoUrl> {
         unsafe {
             self.downcast::<HTMLImageElement>()
                 .expect("not an image!")
@@ -1363,7 +1370,7 @@ impl Node {
     pub fn reflect_node<N>(
             node: Box<N>,
             document: &Document,
-            wrap_fn: extern "Rust" fn(*mut JSContext, &GlobalScope, Box<N>) -> Root<N>)
+            wrap_fn: unsafe extern "Rust" fn(*mut JSContext, &GlobalScope, Box<N>) -> Root<N>)
             -> Root<N>
         where N: DerivedFrom<Node> + Reflectable
     {
@@ -1743,7 +1750,7 @@ impl Node {
                 let window = document.window();
                 let loader = DocumentLoader::new(&*document.loader());
                 let document = Document::new(window, None,
-                                             Some((*document.url()).clone()),
+                                             Some(document.url()),
                                              is_html_doc, None,
                                              None, DocumentSource::NotFromParser, loader,
                                              None, None);

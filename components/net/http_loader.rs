@@ -11,6 +11,7 @@ use cookie_storage::CookieStorage;
 use devtools_traits::{ChromeToDevtoolsControlMsg, DevtoolsControlMsg, HttpRequest as DevtoolsHttpRequest};
 use devtools_traits::{HttpResponse as DevtoolsHttpResponse, NetworkEvent};
 use flate2::read::{DeflateDecoder, GzDecoder};
+use fnv::FnvHashSet;
 use hsts::{HstsEntry, HstsList, secure_url};
 use hyper::Error as HttpError;
 use hyper::LanguageTag;
@@ -28,9 +29,9 @@ use hyper_serde::Serde;
 use ipc_channel::ipc::{self, IpcSender};
 use log;
 use mime_classifier::MimeClassifier;
-use msg::constellation_msg::{PipelineId, ReferrerPolicy};
+use msg::constellation_msg::PipelineId;
 use net_traits::{CookieSource, IncludeSubdomains, LoadConsumer, LoadContext, LoadData};
-use net_traits::{CustomResponse, CustomResponseMediator, Metadata, NetworkError};
+use net_traits::{CustomResponse, CustomResponseMediator, Metadata, NetworkError, ReferrerPolicy};
 use net_traits::ProgressMsg::{Done, Payload};
 use net_traits::hosts::replace_hosts;
 use net_traits::response::HttpsState;
@@ -39,9 +40,9 @@ use openssl::ssl::error::{OpensslError, SslError};
 use profile_traits::time::{ProfilerCategory, ProfilerChan, TimerMetadata, profile};
 use profile_traits::time::{TimerMetadataFrameType, TimerMetadataReflowType};
 use resource_thread::{AuthCache, AuthCacheEntry, CancellationListener, send_error, start_sending_sniffed_opt};
+use servo_url::ServoUrl;
 use std::borrow::{Cow, ToOwned};
 use std::boxed::FnBox;
-use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 use std::io::{self, Cursor, Read, Write};
@@ -52,8 +53,7 @@ use time;
 use time::Tm;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use tinyfiledialogs;
-use url::{Position, Url, Origin};
-use util::prefs::PREFS;
+use url::{Position, Origin};
 use util::thread::spawn_named;
 use uuid;
 
@@ -247,7 +247,7 @@ impl Read for ReadableCustomResponse {
 pub trait HttpRequestFactory {
     type R: HttpRequest;
 
-    fn create(&self, url: Url, method: Method, headers: Headers) -> Result<Self::R, LoadError>;
+    fn create(&self, url: ServoUrl, method: Method, headers: Headers) -> Result<Self::R, LoadError>;
 }
 
 pub struct NetworkHttpRequestFactory {
@@ -257,9 +257,11 @@ pub struct NetworkHttpRequestFactory {
 impl HttpRequestFactory for NetworkHttpRequestFactory {
     type R = WrappedHttpRequest;
 
-    fn create(&self, url: Url, method: Method, headers: Headers)
+    fn create(&self, url: ServoUrl, method: Method, headers: Headers)
               -> Result<WrappedHttpRequest, LoadError> {
-        let connection = Request::with_connector(method, url.clone(), &*self.connector);
+        let connection = Request::with_connector(method,
+                                                 url.clone().into_url().unwrap(),
+                                                 &*self.connector);
 
         if let Err(HttpError::Ssl(ref error)) = connection {
             let error: &(Error + Send + 'static) = &**error;
@@ -309,7 +311,7 @@ impl HttpRequest for WrappedHttpRequest {
     type R = WrappedHttpResponse;
 
     fn send(self, body: &Option<Vec<u8>>) -> Result<WrappedHttpResponse, LoadError> {
-        let url = self.request.url.clone();
+        let url = ServoUrl::from_url(self.request.url.clone());
         let mut request_writer = match self.request.start() {
             Ok(streaming) => streaming,
             Err(e) => return Err(LoadError::new(url, LoadErrorType::Connection { reason: e.description().to_owned() })),
@@ -336,12 +338,12 @@ impl HttpRequest for WrappedHttpRequest {
 
 #[derive(Debug)]
 pub struct LoadError {
-    pub url: Url,
+    pub url: ServoUrl,
     pub error: LoadErrorType,
 }
 
 impl LoadError {
-    pub fn new(url: Url, error: LoadErrorType) -> LoadError {
+    pub fn new(url: ServoUrl, error: LoadErrorType) -> LoadError {
         LoadError {
             url: url,
             error: error,
@@ -413,7 +415,7 @@ fn set_default_accept(headers: &mut Headers) {
     }
 }
 
-fn set_default_accept_language(headers: &mut Headers) {
+pub fn set_default_accept_language(headers: &mut Headers) {
     if headers.has::<AcceptLanguage>() {
         return;
     }
@@ -430,22 +432,42 @@ fn set_default_accept_language(headers: &mut Headers) {
 }
 
 /// https://w3c.github.io/webappsec-referrer-policy/#referrer-policy-state-no-referrer-when-downgrade
-fn no_referrer_when_downgrade_header(referrer_url: Url, url: Url) -> Option<Url> {
+fn no_referrer_when_downgrade_header(referrer_url: ServoUrl, url: ServoUrl) -> Option<ServoUrl> {
     if referrer_url.scheme() == "https" && url.scheme() != "https" {
         return None;
     }
     return strip_url(referrer_url, false);
 }
 
+/// https://w3c.github.io/webappsec-referrer-policy/#referrer-policy-strict-origin
+fn strict_origin(referrer_url: ServoUrl, url: ServoUrl) -> Option<ServoUrl> {
+    if referrer_url.scheme() == "https" && url.scheme() != "https" {
+        return None;
+    }
+    strip_url(referrer_url, true)
+}
+
+/// https://w3c.github.io/webappsec-referrer-policy/#referrer-policy-strict-origin-when-cross-origin
+fn strict_origin_when_cross_origin(referrer_url: ServoUrl, url: ServoUrl) -> Option<ServoUrl> {
+    if referrer_url.scheme() == "https" && url.scheme() != "https" {
+        return None;
+    }
+    let cross_origin = referrer_url.origin() != url.origin();
+    strip_url(referrer_url, cross_origin)
+}
+
 /// https://w3c.github.io/webappsec-referrer-policy/#strip-url
-fn strip_url(mut referrer_url: Url, origin_only: bool) -> Option<Url> {
+fn strip_url(mut referrer_url: ServoUrl, origin_only: bool) -> Option<ServoUrl> {
     if referrer_url.scheme() == "https" || referrer_url.scheme() == "http" {
-        referrer_url.set_username("").unwrap();
-        referrer_url.set_password(None).unwrap();
-        referrer_url.set_fragment(None);
-        if origin_only {
-            referrer_url.set_path("");
-            referrer_url.set_query(None);
+        {
+            let referrer = referrer_url.as_mut_url().unwrap();
+            referrer.set_username("").unwrap();
+            referrer.set_password(None).unwrap();
+            referrer.set_fragment(None);
+            if origin_only {
+                referrer.set_path("");
+                referrer.set_query(None);
+            }
         }
         return Some(referrer_url);
     }
@@ -455,8 +477,8 @@ fn strip_url(mut referrer_url: Url, origin_only: bool) -> Option<Url> {
 /// https://w3c.github.io/webappsec-referrer-policy/#determine-requests-referrer
 pub fn determine_request_referrer(headers: &mut Headers,
                                   referrer_policy: Option<ReferrerPolicy>,
-                                  referrer_url: Option<Url>,
-                                  url: Url) -> Option<Url> {
+                                  referrer_url: Option<ServoUrl>,
+                                  url: ServoUrl) -> Option<ServoUrl> {
     //TODO - algorithm step 2 not addressed
     assert!(!headers.has::<Referer>());
     if let Some(ref_url) = referrer_url {
@@ -467,6 +489,8 @@ pub fn determine_request_referrer(headers: &mut Headers,
             Some(ReferrerPolicy::SameOrigin) => if cross_origin { None } else { strip_url(ref_url, false) },
             Some(ReferrerPolicy::UnsafeUrl) => strip_url(ref_url, false),
             Some(ReferrerPolicy::OriginWhenCrossOrigin) => strip_url(ref_url, cross_origin),
+            Some(ReferrerPolicy::StrictOrigin) => strict_origin(ref_url, url),
+            Some(ReferrerPolicy::StrictOriginWhenCrossOrigin) => strict_origin_when_cross_origin(ref_url, url),
             Some(ReferrerPolicy::NoReferrerWhenDowngrade) | None =>
                 no_referrer_when_downgrade_header(ref_url, url),
         };
@@ -474,7 +498,7 @@ pub fn determine_request_referrer(headers: &mut Headers,
     return None;
 }
 
-pub fn set_request_cookies(url: &Url, headers: &mut Headers, cookie_jar: &Arc<RwLock<CookieStorage>>) {
+pub fn set_request_cookies(url: &ServoUrl, headers: &mut Headers, cookie_jar: &Arc<RwLock<CookieStorage>>) {
     let mut cookie_jar = cookie_jar.write().unwrap();
     if let Some(cookie_list) = cookie_jar.cookies_for_url(url, CookieSource::HTTP) {
         let mut v = Vec::new();
@@ -484,7 +508,7 @@ pub fn set_request_cookies(url: &Url, headers: &mut Headers, cookie_jar: &Arc<Rw
 }
 
 fn set_cookie_for_url(cookie_jar: &Arc<RwLock<CookieStorage>>,
-                      request: &Url,
+                      request: &ServoUrl,
                       cookie_val: String) {
     let mut cookie_jar = cookie_jar.write().unwrap();
     let source = CookieSource::HTTP;
@@ -499,7 +523,7 @@ fn set_cookie_for_url(cookie_jar: &Arc<RwLock<CookieStorage>>,
     }
 }
 
-pub fn set_cookies_from_headers(url: &Url, headers: &Headers, cookie_jar: &Arc<RwLock<CookieStorage>>) {
+pub fn set_cookies_from_headers(url: &ServoUrl, headers: &Headers, cookie_jar: &Arc<RwLock<CookieStorage>>) {
     if let Some(cookies) = headers.get_raw("set-cookie") {
         for cookie in cookies.iter() {
             if let Ok(cookie_value) = String::from_utf8(cookie.clone()) {
@@ -511,7 +535,7 @@ pub fn set_cookies_from_headers(url: &Url, headers: &Headers, cookie_jar: &Arc<R
     }
 }
 
-fn update_sts_list_from_response(url: &Url, response: &HttpResponse, hsts_list: &Arc<RwLock<HstsList>>) {
+fn update_sts_list_from_response(url: &ServoUrl, response: &HttpResponse, hsts_list: &Arc<RwLock<HstsList>>) {
     if url.scheme() != "https" {
         return;
     }
@@ -595,7 +619,7 @@ enum Decoder {
 }
 
 fn prepare_devtools_request(request_id: String,
-                            url: Url,
+                            url: ServoUrl,
                             method: Method,
                             headers: Headers,
                             body: Option<Vec<u8>>,
@@ -638,7 +662,7 @@ pub fn send_response_to_devtools(devtools_chan: &Sender<DevtoolsControlMsg>,
     let _ = devtools_chan.send(DevtoolsControlMsg::FromChrome(msg));
 }
 
-fn request_must_be_secured(url: &Url, hsts_list: &Arc<RwLock<HstsList>>) -> bool {
+fn request_must_be_secured(url: &ServoUrl, hsts_list: &Arc<RwLock<HstsList>>) -> bool {
     match url.domain() {
         Some(domain) => hsts_list.read().unwrap().is_host_secure(domain),
         None => false
@@ -646,10 +670,10 @@ fn request_must_be_secured(url: &Url, hsts_list: &Arc<RwLock<HstsList>>) -> bool
 }
 
 pub fn modify_request_headers(headers: &mut Headers,
-                              url: &Url,
+                              url: &ServoUrl,
                               user_agent: &str,
                               referrer_policy: Option<ReferrerPolicy>,
-                              referrer_url: &mut Option<Url>) {
+                              referrer_url: &mut Option<ServoUrl>) {
     // Ensure that the host header is set from the original url
     let host = Host {
         hostname: url.host_str().unwrap().to_owned(),
@@ -682,7 +706,7 @@ pub fn modify_request_headers(headers: &mut Headers,
 }
 
 fn set_auth_header(headers: &mut Headers,
-                   url: &Url,
+                   url: &ServoUrl,
                    auth_cache: &Arc<RwLock<AuthCache>>) {
     if !headers.has::<Authorization<Basic>>() {
         if let Some(auth) = auth_from_url(url) {
@@ -705,7 +729,7 @@ pub fn auth_from_cache(auth_cache: &Arc<RwLock<AuthCache>>, origin: &Origin) -> 
     }
 }
 
-fn auth_from_url(doc_url: &Url) -> Option<Authorization<Basic>> {
+fn auth_from_url(doc_url: &ServoUrl) -> Option<Authorization<Basic>> {
     let username = doc_url.username();
     if username != "" {
         Some(Authorization(Basic {
@@ -718,7 +742,7 @@ fn auth_from_url(doc_url: &Url) -> Option<Authorization<Basic>> {
 }
 
 pub fn process_response_headers(response: &HttpResponse,
-                                url: &Url,
+                                url: &ServoUrl,
                                 cookie_jar: &Arc<RwLock<CookieStorage>>,
                                 hsts_list: &Arc<RwLock<HstsList>>,
                                 load_data: &LoadData) {
@@ -737,7 +761,7 @@ pub fn process_response_headers(response: &HttpResponse,
 }
 
 pub fn obtain_response<A>(request_factory: &HttpRequestFactory<R=A>,
-                          url: &Url,
+                          url: &ServoUrl,
                           method: &Method,
                           request_headers: &Headers,
                           cancel_listener: &CancellationListener,
@@ -784,7 +808,7 @@ pub fn obtain_response<A>(request_factory: &HttpRequestFactory<R=A>,
         }
 
         if log_enabled!(log::LogLevel::Info) {
-            info!("{}", method);
+            info!("{} {}", method, connection_url);
             for header in headers.iter() {
                 info!(" - {}", header);
             }
@@ -816,9 +840,11 @@ pub fn obtain_response<A>(request_factory: &HttpRequestFactory<R=A>,
                     request_body.clone(), pipeline_id, time::now(),
                     connect_end - connect_start, send_end - send_start, is_xhr))
             } else {
+                debug!("Not notifying devtools (no pipeline_id)");
                 None
             }
         } else {
+            debug!("Not notifying devtools (no request_id)");
             None
         };
 
@@ -869,11 +895,10 @@ pub fn load<A, B>(load_data: &LoadData,
                   cancel_listener: &CancellationListener,
                   swmanager_chan: Option<IpcSender<CustomResponseMediator>>)
                   -> Result<StreamedResponse, LoadError> where A: HttpRequest + 'static, B: UIProvider {
-    let max_redirects = PREFS.get("network.http.redirection-limit").as_i64().unwrap() as u32;
     let mut iters = 0;
     // URL of the document being loaded, as seen by all the higher-level code.
     let mut doc_url = load_data.url.clone();
-    let mut redirected_to = HashSet::new();
+    let mut redirected_to = FnvHashSet::with_hasher(Default::default());
     let mut method = load_data.method.clone();
     // URL of referrer - to be updated with redirects
     let mut referrer_url = load_data.referrer_url.clone();
@@ -906,7 +931,7 @@ pub fn load<A, B>(load_data: &LoadData,
     // the source rather than rendering the contents of the URL.
     let viewing_source = doc_url.scheme() == "view-source";
     if viewing_source {
-        doc_url = Url::parse(&load_data.url[Position::BeforeUsername..]).unwrap();
+        doc_url = ServoUrl::parse(&load_data.url[Position::BeforeUsername..]).unwrap();
     }
 
     // Loop to handle redirects.
@@ -915,10 +940,10 @@ pub fn load<A, B>(load_data: &LoadData,
 
         if doc_url.scheme() == "http" && request_must_be_secured(&doc_url, &http_state.hsts_list) {
             info!("{} is in the strict transport security list, requesting secure host", doc_url);
-            doc_url = secure_url(&doc_url);
+            doc_url = ServoUrl::from_url(secure_url(&doc_url.as_url().unwrap()));
         }
 
-        if iters > max_redirects {
+        if iters > 20 {
             return Err(LoadError::new(doc_url, LoadErrorType::MaxRedirects(iters - 1)));
         }
 
@@ -939,7 +964,7 @@ pub fn load<A, B>(load_data: &LoadData,
                          .unwrap_or(false);
             let load_type = if same_origin { LoadType::FirstParty } else { LoadType::ThirdParty };
             let actions = process_rules_for_request(rules, &CBRequest {
-                url: &doc_url,
+                url: doc_url.as_url().unwrap(),
                 resource_type: to_resource_type(&load_data.context),
                 load_type: load_type,
             });

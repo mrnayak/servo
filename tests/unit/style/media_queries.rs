@@ -5,14 +5,14 @@
 use app_units::Au;
 use cssparser::{Parser, SourcePosition};
 use euclid::size::TypedSize2D;
+use servo_url::ServoUrl;
 use std::borrow::ToOwned;
 use style::Atom;
 use style::error_reporting::ParseErrorReporter;
 use style::media_queries::*;
 use style::parser::ParserContextExtraData;
-use style::stylesheets::{Stylesheet, Origin, CSSRule};
+use style::stylesheets::{Stylesheet, Origin, CssRule};
 use style::values::specified;
-use url::Url;
 
 pub struct CSSErrorReporterTest;
 
@@ -24,19 +24,20 @@ impl ParseErrorReporter for CSSErrorReporterTest {
      }
 }
 
-fn test_media_rule<F>(css: &str, callback: F) where F: Fn(&MediaQueryList, &str) {
-    let url = Url::parse("http://localhost").unwrap();
-    let stylesheet = Stylesheet::from_str(css, url, Origin::Author, Box::new(CSSErrorReporterTest),
-                                          ParserContextExtraData::default());
+fn test_media_rule<F>(css: &str, callback: F) where F: Fn(&MediaList, &str) {
+    let url = ServoUrl::parse("http://localhost").unwrap();
+    let stylesheet = Stylesheet::from_str(
+        css, url, Origin::Author, Default::default(),
+        Box::new(CSSErrorReporterTest), ParserContextExtraData::default());
     let mut rule_count = 0;
-    media_queries(&stylesheet.rules, &mut |mq| {
+    media_queries(&stylesheet.rules.0.read(), &mut |mq| {
         rule_count += 1;
         callback(mq, css);
     });
     assert!(rule_count > 0);
 }
 
-fn media_queries<F>(rules: &[CSSRule], f: &mut F) where F: FnMut(&MediaQueryList) {
+fn media_queries<F>(rules: &[CssRule], f: &mut F) where F: FnMut(&MediaList) {
     for rule in rules {
         rule.with_nested_rules_and_mq(|rules, mq| {
             if let Some(mq) = mq {
@@ -48,9 +49,10 @@ fn media_queries<F>(rules: &[CSSRule], f: &mut F) where F: FnMut(&MediaQueryList
 }
 
 fn media_query_test(device: &Device, css: &str, expected_rule_count: usize) {
-    let url = Url::parse("http://localhost").unwrap();
-    let ss = Stylesheet::from_str(css, url, Origin::Author, Box::new(CSSErrorReporterTest),
-                                  ParserContextExtraData::default());
+    let url = ServoUrl::parse("http://localhost").unwrap();
+    let ss = Stylesheet::from_str(
+        css, url, Origin::Author, Default::default(),
+        Box::new(CSSErrorReporterTest), ParserContextExtraData::default());
     let mut rule_count = 0;
     ss.effective_style_rules(device, |_| rule_count += 1);
     assert!(rule_count == expected_rule_count, css.to_owned());
@@ -59,11 +61,7 @@ fn media_query_test(device: &Device, css: &str, expected_rule_count: usize) {
 #[test]
 fn test_mq_empty() {
     test_media_rule("@media { }", |list, css| {
-        assert!(list.media_queries.len() == 1, css.to_owned());
-        let q = &list.media_queries[0];
-        assert!(q.qualifier == None, css.to_owned());
-        assert!(q.media_type == MediaQueryType::All, css.to_owned());
-        assert!(q.expressions.len() == 0, css.to_owned());
+        assert!(list.media_queries.len() == 0, css.to_owned());
     });
 }
 

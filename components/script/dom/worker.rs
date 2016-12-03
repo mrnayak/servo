@@ -138,7 +138,7 @@ impl Worker {
 
     pub fn dispatch_simple_error(address: TrustedWorkerAddress) {
         let worker = address.root();
-        worker.upcast().fire_simple_event("error");
+        worker.upcast().fire_event(atom!("error"));
     }
 
     #[allow(unsafe_code)]
@@ -164,8 +164,9 @@ impl Worker {
 }
 
 impl WorkerMethods for Worker {
+    #[allow(unsafe_code)]
     // https://html.spec.whatwg.org/multipage/#dom-worker-postmessage
-    fn PostMessage(&self, cx: *mut JSContext, message: HandleValue) -> ErrorResult {
+    unsafe fn PostMessage(&self, cx: *mut JSContext, message: HandleValue) -> ErrorResult {
         let data = try!(StructuredCloneData::write(cx, message));
         let address = Trusted::new(self);
 

@@ -36,12 +36,11 @@ extern crate range;
 extern crate script_traits;
 extern crate selectors;
 #[macro_use] extern crate servo_atoms;
+extern crate servo_url;
 extern crate style;
-extern crate url;
 
 pub mod message;
 pub mod reporter;
-pub mod restyle_damage;
 pub mod rpc;
 pub mod wrapper_traits;
 
@@ -49,10 +48,11 @@ use canvas_traits::CanvasMsg;
 use core::nonzero::NonZero;
 use ipc_channel::ipc::IpcSender;
 use libc::c_void;
-use restyle_damage::RestyleDamage;
 use std::sync::atomic::AtomicIsize;
 use style::atomic_refcell::AtomicRefCell;
 use style::data::ElementData;
+use style::dom::TRestyleDamage;
+use style::selector_parser::RestyleDamage;
 
 pub struct PartialPersistentLayoutData {
     /// Data that the style system associates with a node. When the
@@ -72,7 +72,10 @@ impl PartialPersistentLayoutData {
     pub fn new() -> Self {
         PartialPersistentLayoutData {
             style_data: ElementData::new(),
-            restyle_damage: RestyleDamage::empty(),
+            // FIXME(bholley): This is needed for now to make sure we do frame
+            // construction after initial styling. This will go away shortly when
+            // we move restyle damage into the style system.
+            restyle_damage: RestyleDamage::rebuild_and_reflow(),
             parallel: DomParallelInfo::new(),
         }
     }

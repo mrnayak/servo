@@ -28,8 +28,7 @@ use dom::globalscope::GlobalScope;
 use dom::headers::is_forbidden_header_name;
 use dom::htmlformelement::{encode_multipart_form_data, generate_boundary};
 use dom::progressevent::ProgressEvent;
-use dom::servoparser::html::{ParseContext, parse_html};
-use dom::servoparser::xml::{self, parse_xml};
+use dom::servoparser::ServoParser;
 use dom::window::Window;
 use dom::workerglobalscope::WorkerGlobalScope;
 use dom::xmlhttprequesteventtarget::XMLHttpRequestEventTarget;
@@ -48,24 +47,25 @@ use ipc_channel::router::ROUTER;
 use js::jsapi::{JSContext, JS_ParseJSON};
 use js::jsapi::JS_ClearPendingException;
 use js::jsval::{JSVal, NullValue, UndefinedValue};
-use msg::constellation_msg::{PipelineId, ReferrerPolicy};
-use net_traits::{CoreResourceThread, FetchMetadata, FilteredMetadata};
-use net_traits::{FetchResponseListener, LoadOrigin, NetworkError};
+use msg::constellation_msg::PipelineId;
+use net_traits::{FetchMetadata, FilteredMetadata};
+use net_traits::{FetchResponseListener, LoadOrigin, NetworkError, ReferrerPolicy};
 use net_traits::CoreResourceMsg::Fetch;
 use net_traits::request::{CredentialsMode, Destination, RequestInit, RequestMode};
 use net_traits::trim_http_whitespace;
 use network_listener::{NetworkListener, PreInvoke};
-use script_runtime::ScriptChan;
 use servo_atoms::Atom;
+use servo_url::ServoUrl;
 use std::ascii::AsciiExt;
 use std::borrow::ToOwned;
 use std::cell::Cell;
 use std::default::Default;
 use std::str;
 use std::sync::{Arc, Mutex};
+use task_source::networking::NetworkingTaskSource;
 use time;
 use timers::{OneshotTimerCallback, OneshotTimerHandle};
-use url::{Position, Url};
+use url::Position;
 use util::prefs::PREFS;
 
 #[derive(JSTraceable, PartialEq, Copy, Clone, HeapSizeOf)]
@@ -138,7 +138,7 @@ pub struct XMLHttpRequest {
     // Associated concepts
     #[ignore_heap_size_of = "Defined in hyper"]
     request_method: DOMRefCell<Method>,
-    request_url: DOMRefCell<Option<Url>>,
+    request_url: DOMRefCell<Option<ServoUrl>>,
     #[ignore_heap_size_of = "Defined in hyper"]
     request_headers: DOMRefCell<Headers>,
     request_body_len: Cell<usize>,
@@ -150,7 +150,7 @@ pub struct XMLHttpRequest {
     fetch_time: Cell<i64>,
     generation_id: Cell<GenerationId>,
     response_status: Cell<Result<(), ()>>,
-    referrer_url: Option<Url>,
+    referrer_url: Option<ServoUrl>,
     referrer_policy: Option<ReferrerPolicy>,
 }
 
@@ -159,7 +159,7 @@ impl XMLHttpRequest {
         //TODO - update this when referrer policy implemented for workers
         let (referrer_url, referrer_policy) = if let Some(window) = global.downcast::<Window>() {
             let document = window.Document();
-            (Some(document.url().clone()), document.get_referrer_policy())
+            (Some(document.url()), document.get_referrer_policy())
         } else {
             (None, None)
         };
@@ -170,7 +170,7 @@ impl XMLHttpRequest {
             timeout: Cell::new(0u32),
             with_credentials: Cell::new(false),
             upload: JS::from_ref(&*XMLHttpRequestUpload::new(global)),
-            response_url: DOMRefCell::new(String::from("")),
+            response_url: DOMRefCell::new(String::new()),
             status: Cell::new(0),
             status_text: DOMRefCell::new(ByteString::new(vec!())),
             response: DOMRefCell::new(ByteString::new(vec!())),
@@ -214,8 +214,8 @@ impl XMLHttpRequest {
     }
 
     fn initiate_async_xhr(context: Arc<Mutex<XHRContext>>,
-                          script_chan: Box<ScriptChan + Send>,
-                          core_resource_thread: CoreResourceThread,
+                          task_source: NetworkingTaskSource,
+                          global: &GlobalScope,
                           init: RequestInit) {
         impl FetchResponseListener for XHRContext {
             fn process_request_body(&mut self) {
@@ -262,18 +262,18 @@ impl XMLHttpRequest {
         let (action_sender, action_receiver) = ipc::channel().unwrap();
         let listener = NetworkListener {
             context: context,
-            script_chan: script_chan,
-            wrapper: None,
+            task_source: task_source,
+            wrapper: Some(global.get_runnable_wrapper())
         };
         ROUTER.add_route(action_receiver.to_opaque(), box move |message| {
             listener.notify_fetch(message.to().unwrap());
         });
-        core_resource_thread.send(Fetch(init, action_sender)).unwrap();
+        global.core_resource_thread().send(Fetch(init, action_sender)).unwrap();
     }
 }
 
 impl LoadOrigin for XMLHttpRequest {
-    fn referrer_url(&self) -> Option<Url> {
+    fn referrer_url(&self) -> Option<ServoUrl> {
         return self.referrer_url.clone();
     }
 
@@ -590,7 +590,7 @@ impl XMLHttpRequestMethods for XMLHttpRequest {
             // https://github.com/whatwg/xhr/issues/71
             destination: Destination::None,
             synchronous: self.sync.get(),
-            mode: RequestMode::CORSMode,
+            mode: RequestMode::CorsMode,
             use_cors_preflight: has_handlers,
             credentials_mode: credentials_mode,
             use_url_credentials: use_url_credentials,
@@ -761,47 +761,45 @@ impl XMLHttpRequestMethods for XMLHttpRequest {
 
     #[allow(unsafe_code)]
     // https://xhr.spec.whatwg.org/#the-response-attribute
-    fn Response(&self, cx: *mut JSContext) -> JSVal {
-        unsafe {
-            rooted!(in(cx) let mut rval = UndefinedValue());
-            match self.response_type.get() {
-                XMLHttpRequestResponseType::_empty | XMLHttpRequestResponseType::Text => {
-                    let ready_state = self.ready_state.get();
-                    // Step 2
-                    if ready_state == XMLHttpRequestState::Done || ready_state == XMLHttpRequestState::Loading {
-                        self.text_response().to_jsval(cx, rval.handle_mut());
-                    } else {
-                    // Step 1
-                        "".to_jsval(cx, rval.handle_mut());
-                    }
-                },
-                // Step 1
-                _ if self.ready_state.get() != XMLHttpRequestState::Done => {
-                    return NullValue();
-                },
+    unsafe fn Response(&self, cx: *mut JSContext) -> JSVal {
+        rooted!(in(cx) let mut rval = UndefinedValue());
+        match self.response_type.get() {
+            XMLHttpRequestResponseType::_empty | XMLHttpRequestResponseType::Text => {
+                let ready_state = self.ready_state.get();
                 // Step 2
-                XMLHttpRequestResponseType::Document => {
-                    let op_doc = self.document_response();
-                    if let Some(doc) = op_doc {
-                        doc.to_jsval(cx, rval.handle_mut());
-                    } else {
-                    // Substep 1
-                        return NullValue();
-                    }
-                },
-                XMLHttpRequestResponseType::Json => {
-                    self.json_response(cx).to_jsval(cx, rval.handle_mut());
-                },
-                XMLHttpRequestResponseType::Blob => {
-                    self.blob_response().to_jsval(cx, rval.handle_mut());
-                },
-                _ => {
-                    // XXXManishearth handle other response types
-                    self.response.borrow().to_jsval(cx, rval.handle_mut());
+                if ready_state == XMLHttpRequestState::Done || ready_state == XMLHttpRequestState::Loading {
+                    self.text_response().to_jsval(cx, rval.handle_mut());
+                } else {
+                // Step 1
+                    "".to_jsval(cx, rval.handle_mut());
                 }
+            },
+            // Step 1
+            _ if self.ready_state.get() != XMLHttpRequestState::Done => {
+                return NullValue();
+            },
+            // Step 2
+            XMLHttpRequestResponseType::Document => {
+                let op_doc = self.document_response();
+                if let Some(doc) = op_doc {
+                    doc.to_jsval(cx, rval.handle_mut());
+                } else {
+                // Substep 1
+                    return NullValue();
+                }
+            },
+            XMLHttpRequestResponseType::Json => {
+                self.json_response(cx).to_jsval(cx, rval.handle_mut());
+            },
+            XMLHttpRequestResponseType::Blob => {
+                self.blob_response().to_jsval(cx, rval.handle_mut());
+            },
+            _ => {
+                // XXXManishearth handle other response types
+                self.response.borrow().to_jsval(cx, rval.handle_mut());
             }
-            rval.get()
         }
+        rval.get()
     }
 
     // https://xhr.spec.whatwg.org/#the-responsetext-attribute
@@ -863,7 +861,8 @@ impl XMLHttpRequest {
     }
 
     fn process_headers_available(&self,
-                                 gen_id: GenerationId, metadata: Result<FetchMetadata, NetworkError>)
+                                 gen_id: GenerationId,
+                                 metadata: Result<FetchMetadata, NetworkError>)
                                  -> Result<(), Error> {
         let metadata = match metadata {
             Ok(meta) => match meta {
@@ -1199,10 +1198,11 @@ impl XMLHttpRequest {
         let decoded = charset.decode(&self.response.borrow(), DecoderTrap::Replace).unwrap();
         let document = self.new_doc(IsHTMLDocument::HTMLDocument);
         // TODO: Disable scripting while parsing
-        parse_html(&document,
-                   DOMString::from(decoded),
-                   wr.get_url(),
-                   ParseContext::Owner(Some(wr.pipeline_id())));
+        ServoParser::parse_html_document(
+            &document,
+            DOMString::from(decoded),
+            wr.get_url(),
+            Some(wr.pipeline_id()));
         document
     }
 
@@ -1212,10 +1212,11 @@ impl XMLHttpRequest {
         let decoded = charset.decode(&self.response.borrow(), DecoderTrap::Replace).unwrap();
         let document = self.new_doc(IsHTMLDocument::NonHTMLDocument);
         // TODO: Disable scripting while parsing
-        parse_xml(&document,
-                  DOMString::from(decoded),
-                  wr.get_url(),
-                  xml::ParseContext::Owner(Some(wr.pipeline_id())));
+        ServoParser::parse_xml_document(
+            &document,
+            DOMString::from(decoded),
+            wr.get_url(),
+            Some(wr.pipeline_id()));
         document
     }
 
@@ -1293,16 +1294,15 @@ impl XMLHttpRequest {
             sync_status: DOMRefCell::new(None),
         }));
 
-        let (script_chan, script_port) = if self.sync.get() {
+        let (task_source, script_port) = if self.sync.get() {
             let (tx, rx) = global.new_script_pair();
-            (tx, Some(rx))
+            (NetworkingTaskSource(tx), Some(rx))
         } else {
             (global.networking_task_source(), None)
         };
 
-        let core_resource_thread = global.core_resource_thread();
-        XMLHttpRequest::initiate_async_xhr(context.clone(), script_chan,
-                                           core_resource_thread, init);
+        XMLHttpRequest::initiate_async_xhr(context.clone(), task_source,
+                                           global, init);
 
         if let Some(script_port) = script_port {
             loop {

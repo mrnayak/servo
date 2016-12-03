@@ -35,11 +35,11 @@ use net_traits::request::{CredentialsMode, Destination, RequestInit, Type as Req
 use network_listener::{NetworkListener, PreInvoke};
 use script_thread::{Runnable, ScriptThread};
 use servo_atoms::Atom;
+use servo_url::ServoUrl;
 use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 use task_source::TaskSource;
 use time::{self, Timespec, Duration};
-use url::Url;
 
 struct HTMLMediaElementContext {
     /// The element that initiated the request.
@@ -53,7 +53,7 @@ struct HTMLMediaElementContext {
     /// Time of last progress notification.
     next_progress_event: Timespec,
     /// Url of resource requested.
-    url: Url,
+    url: ServoUrl,
     /// Whether the media metadata has been completely received.
     have_metadata: bool,
     /// True if this response is invalid and should be ignored.
@@ -164,7 +164,7 @@ impl PreInvoke for HTMLMediaElementContext {
 }
 
 impl HTMLMediaElementContext {
-    fn new(elem: &HTMLMediaElement, url: Url) -> HTMLMediaElementContext {
+    fn new(elem: &HTMLMediaElement, url: ServoUrl) -> HTMLMediaElementContext {
         HTMLMediaElementContext {
             elem: Trusted::new(elem),
             data: vec![],
@@ -437,7 +437,7 @@ impl HTMLMediaElement {
     }
 
     // https://html.spec.whatwg.org/multipage/#concept-media-load-algorithm
-    fn resource_selection_algorithm_sync(&self, base_url: Url) {
+    fn resource_selection_algorithm_sync(&self, base_url: ServoUrl) {
         // TODO step 5 (populate pending text tracks)
 
         // Step 6
@@ -521,11 +521,10 @@ impl HTMLMediaElement {
             let context = Arc::new(Mutex::new(HTMLMediaElementContext::new(self, url.clone())));
             let (action_sender, action_receiver) = ipc::channel().unwrap();
             let window = window_from_node(self);
-            let script_chan = window.networking_task_source();
             let listener = NetworkListener {
                 context: context,
-                script_chan: script_chan,
-                wrapper: Some(window.get_runnable_wrapper()),
+                task_source: window.networking_task_source(),
+                wrapper: Some(window.get_runnable_wrapper())
             };
 
             ROUTER.add_route(action_receiver.to_opaque(), box move |message| {
@@ -549,9 +548,9 @@ impl HTMLMediaElement {
                 destination: Destination::Media,
                 credentials_mode: CredentialsMode::Include,
                 use_url_credentials: true,
-                origin: document.url().clone(),
+                origin: document.url(),
                 pipeline_id: Some(self.global().pipeline_id()),
-                referrer_url: Some(document.url().clone()),
+                referrer_url: Some(document.url()),
                 referrer_policy: document.get_referrer_policy(),
                 .. RequestInit::default()
             };
@@ -815,11 +814,11 @@ impl Runnable for FireSimpleEventTask {
 
 struct ResourceSelectionTask {
     elem: Trusted<HTMLMediaElement>,
-    base_url: Url,
+    base_url: ServoUrl,
 }
 
 impl ResourceSelectionTask {
-    fn new(elem: &HTMLMediaElement, url: Url) -> ResourceSelectionTask {
+    fn new(elem: &HTMLMediaElement, url: ServoUrl) -> ResourceSelectionTask {
         ResourceSelectionTask {
             elem: Trusted::new(elem),
             base_url: url,
@@ -886,5 +885,5 @@ enum ResourceSelectionMode {
 
 enum Resource {
     Object,
-    Url(Url),
+    Url(ServoUrl),
 }

@@ -7,45 +7,41 @@
 
 use atomic_refcell::{AtomicRef, AtomicRefCell};
 use data::ElementData;
-use dom::{LayoutIterator, NodeInfo, TDocument, TElement, TNode, TRestyleDamage, UnsafeNode};
+use dom::{LayoutIterator, NodeInfo, TElement, TNode, UnsafeNode};
 use dom::{OpaqueNode, PresentationalHintsSynthetizer};
 use element_state::ElementState;
 use error_reporting::StdoutErrorReporter;
-use gecko::selector_impl::{GeckoSelectorImpl, NonTSPseudoClass, PseudoElement};
-use gecko::snapshot::GeckoElementSnapshot;
+use gecko::restyle_damage::GeckoRestyleDamage;
+use gecko::selector_parser::{SelectorImpl, NonTSPseudoClass, PseudoElement};
 use gecko::snapshot_helpers;
 use gecko_bindings::bindings;
-use gecko_bindings::bindings::{Gecko_CalcStyleDifference, Gecko_StoreStyleDifference};
 use gecko_bindings::bindings::{Gecko_DropStyleChildrenIterator, Gecko_MaybeCreateStyleChildrenIterator};
-use gecko_bindings::bindings::{Gecko_ElementState, Gecko_GetDocumentElement};
-use gecko_bindings::bindings::{Gecko_GetLastChild, Gecko_GetNextStyleChild};
+use gecko_bindings::bindings::{Gecko_ElementState, Gecko_GetLastChild, Gecko_GetNextStyleChild};
 use gecko_bindings::bindings::{Gecko_GetServoDeclarationBlock, Gecko_IsHTMLElementInHTMLDocument};
 use gecko_bindings::bindings::{Gecko_IsLink, Gecko_IsRootElement};
 use gecko_bindings::bindings::{Gecko_IsUnvisitedLink, Gecko_IsVisitedLink, Gecko_Namespace};
-use gecko_bindings::bindings::{RawGeckoDocument, RawGeckoElement, RawGeckoNode};
+use gecko_bindings::bindings::{RawGeckoElement, RawGeckoNode};
 use gecko_bindings::bindings::Gecko_ClassOrClassList;
 use gecko_bindings::bindings::Gecko_GetStyleContext;
 use gecko_bindings::bindings::Gecko_SetNodeFlags;
+use gecko_bindings::bindings::Gecko_StoreStyleDifference;
 use gecko_bindings::structs;
 use gecko_bindings::structs::{NODE_HAS_DIRTY_DESCENDANTS_FOR_SERVO, NODE_IS_DIRTY_FOR_SERVO};
-use gecko_bindings::structs::{nsChangeHint, nsIAtom, nsIContent, nsStyleContext};
-use gecko_bindings::sugar::ownership::FFIArcHelpers;
-use libc::uintptr_t;
+use gecko_bindings::structs::{nsIAtom, nsIContent, nsStyleContext};
 use parking_lot::RwLock;
 use parser::ParserContextExtraData;
 use properties::{ComputedValues, parse_style_attribute};
 use properties::PropertyDeclarationBlock;
-use selector_impl::ElementExt;
-use selector_matching::ApplicableDeclarationBlock;
+use selector_parser::ElementExt;
 use selectors::Element;
 use selectors::parser::{AttrSelector, NamespaceConstraint};
+use servo_url::ServoUrl;
 use sink::Push;
 use std::fmt;
-use std::ops::BitOr;
 use std::ptr;
 use std::sync::Arc;
 use string_cache::{Atom, Namespace, WeakAtom, WeakNamespace};
-use url::Url;
+use stylist::ApplicableDeclarationBlock;
 
 // Important: We don't currently refcount the DOM, because the wrapper lifetime
 // magic guarantees that our LayoutFoo references won't outlive the root, and
@@ -66,39 +62,6 @@ impl<'ln> GeckoNode<'ln> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct GeckoRestyleDamage(nsChangeHint);
-
-impl TRestyleDamage for GeckoRestyleDamage {
-    type PreExistingComputedValues = nsStyleContext;
-
-    fn empty() -> Self {
-        use std::mem;
-        GeckoRestyleDamage(unsafe { mem::transmute(0u32) })
-    }
-
-    fn compute(source: &nsStyleContext,
-               new_style: &Arc<ComputedValues>) -> Self {
-        let context = source as *const nsStyleContext as *mut nsStyleContext;
-        let hint = unsafe { Gecko_CalcStyleDifference(context, new_style.as_borrowed_opt().unwrap()) };
-        GeckoRestyleDamage(hint)
-    }
-
-    fn rebuild_and_reflow() -> Self {
-        GeckoRestyleDamage(nsChangeHint::nsChangeHint_ReconstructFrame)
-    }
-}
-
-impl BitOr for GeckoRestyleDamage {
-    type Output = Self;
-
-    fn bitor(self, other: Self) -> Self {
-        use std::mem;
-        GeckoRestyleDamage(unsafe { mem::transmute(self.0 as u32 | other.0 as u32) })
-    }
-}
-
-
 impl<'ln> NodeInfo for GeckoNode<'ln> {
     fn is_element(&self) -> bool {
         use gecko_bindings::structs::nsINode_BooleanFlag;
@@ -113,7 +76,6 @@ impl<'ln> NodeInfo for GeckoNode<'ln> {
 }
 
 impl<'ln> TNode for GeckoNode<'ln> {
-    type ConcreteDocument = GeckoDocument<'ln>;
     type ConcreteElement = GeckoElement<'ln>;
     type ConcreteChildrenIterator = GeckoChildrenIterator<'ln>;
 
@@ -148,7 +110,7 @@ impl<'ln> TNode for GeckoNode<'ln> {
     }
 
     fn opaque(&self) -> OpaqueNode {
-        let ptr: uintptr_t = self.0 as *const _ as uintptr_t;
+        let ptr: usize = self.0 as *const _ as usize;
         OpaqueNode(ptr)
     }
 
@@ -170,10 +132,6 @@ impl<'ln> TNode for GeckoNode<'ln> {
         } else {
             None
         }
-    }
-
-    fn as_document(&self) -> Option<GeckoDocument<'ln>> {
-        unimplemented!()
     }
 
     fn can_be_fragmented(&self) -> bool {
@@ -254,33 +212,6 @@ impl<'a> Iterator for GeckoChildrenIterator<'a> {
 }
 
 #[derive(Clone, Copy)]
-pub struct GeckoDocument<'ld>(pub &'ld RawGeckoDocument);
-
-impl<'ld> TDocument for GeckoDocument<'ld> {
-    type ConcreteNode = GeckoNode<'ld>;
-    type ConcreteElement = GeckoElement<'ld>;
-
-    fn as_node(&self) -> GeckoNode<'ld> {
-        unsafe { GeckoNode(&*(self.0 as *const _ as *const RawGeckoNode)) }
-    }
-
-    fn root_node(&self) -> Option<GeckoNode<'ld>> {
-        unsafe {
-            Gecko_GetDocumentElement(self.0).map(|el| GeckoElement(el).as_node())
-        }
-    }
-
-    fn drain_modified_elements(&self) -> Vec<(GeckoElement<'ld>, GeckoElementSnapshot)> {
-        unimplemented!()
-        /*
-        let elements =  unsafe { self.0.drain_modified_elements() };
-        elements.into_iter().map(|(el, snapshot)| (ServoLayoutElement::from_layout_js(el), snapshot)).collect()*/
-    }
-    fn will_paint(&self) { unimplemented!() }
-    fn needs_paint_from_layout(&self) { unimplemented!() }
-}
-
-#[derive(Clone, Copy)]
 pub struct GeckoElement<'le>(pub &'le RawGeckoElement);
 
 impl<'le> fmt::Debug for GeckoElement<'le> {
@@ -334,7 +265,7 @@ impl<'le> GeckoElement<'le> {
 
     pub fn get_pseudo_style(&self, pseudo: &PseudoElement) -> Option<Arc<ComputedValues>> {
         self.borrow_data().and_then(|data| data.current_styles().pseudos
-                                               .get(pseudo).map(|c| c.clone()))
+                                               .get(pseudo).map(|c| c.0.clone()))
     }
 
     pub fn ensure_data(&self) -> &AtomicRefCell<ElementData> {
@@ -350,15 +281,13 @@ impl<'le> GeckoElement<'le> {
 }
 
 lazy_static! {
-    pub static ref DUMMY_BASE_URL: Url = {
-        Url::parse("http://www.example.org").unwrap()
+    pub static ref DUMMY_BASE_URL: ServoUrl = {
+        ServoUrl::parse("http://www.example.org").unwrap()
     };
 }
 
 impl<'le> TElement for GeckoElement<'le> {
     type ConcreteNode = GeckoNode<'le>;
-    type ConcreteDocument = GeckoDocument<'le>;
-    type ConcreteRestyleDamage = GeckoRestyleDamage;
 
     fn as_node(&self) -> Self::ConcreteNode {
         unsafe { GeckoNode(&*(self.0 as *const _ as *const RawGeckoNode)) }
@@ -400,7 +329,7 @@ impl<'le> TElement for GeckoElement<'le> {
         // drive the post-traversal. This will go away soon.
         unsafe { self.set_flags(NODE_IS_DIRTY_FOR_SERVO as u32) }
 
-        unsafe { Gecko_StoreStyleDifference(self.as_node().0, damage.0) }
+        unsafe { Gecko_StoreStyleDifference(self.as_node().0, damage.as_change_hint()) }
     }
 
     fn existing_style_for_restyle_damage<'a>(&'a self,
@@ -603,7 +532,7 @@ pub trait AttrSelectorHelpers {
     fn select_name(&self, is_html_element_in_html_document: bool) -> *mut nsIAtom;
 }
 
-impl AttrSelectorHelpers for AttrSelector<GeckoSelectorImpl> {
+impl AttrSelectorHelpers for AttrSelector<SelectorImpl> {
     fn ns_or_null(&self) -> *mut nsIAtom {
         match self.namespace {
             NamespaceConstraint::Any => ptr::null_mut(),
@@ -621,7 +550,7 @@ impl AttrSelectorHelpers for AttrSelector<GeckoSelectorImpl> {
 }
 
 impl<'le> ::selectors::MatchAttr for GeckoElement<'le> {
-    type Impl = GeckoSelectorImpl;
+    type Impl = SelectorImpl;
 
     fn match_attr_has(&self, attr: &AttrSelector<Self::Impl>) -> bool {
         unsafe {
@@ -691,8 +620,6 @@ impl<'le> ::selectors::MatchAttr for GeckoElement<'le> {
 }
 
 impl<'le> ElementExt for GeckoElement<'le> {
-    type Snapshot = GeckoElementSnapshot;
-
     #[inline]
     fn is_link(&self) -> bool {
         self.match_non_ts_pseudo_class(NonTSPseudoClass::AnyLink)

@@ -7,11 +7,9 @@
 <% data.new_style_struct("InheritedText", inherited=True, gecko_name="Text") %>
 
 <%helpers:longhand name="line-height" animatable="True">
-    use cssparser::ToCss;
     use std::fmt;
-    use values::LocalToCss;
-    use values::CSSFloat;
-    use values::HasViewportPercentage;
+    use style_traits::ToCss;
+    use values::{CSSFloat, HasViewportPercentage};
 
     impl HasViewportPercentage for SpecifiedValue {
         fn has_viewport_percentage(&self) -> bool {
@@ -153,6 +151,7 @@
     impl ComputedValueAsSpecified for SpecifiedValue {}
     impl NoViewportPercentage for SpecifiedValue {}
     pub mod computed_value {
+        use style_traits::ToCss;
         macro_rules! define_text_align {
             ( $( $name: ident ( $string: expr ) => $discriminant: expr, )+ ) => {
                 define_css_keyword_enum! { T:
@@ -209,9 +208,8 @@
 
 // FIXME: This prop should be animatable.
 <%helpers:longhand name="letter-spacing" animatable="False">
-    use cssparser::ToCss;
     use std::fmt;
-    use values::LocalToCss;
+    use style_traits::ToCss;
     use values::HasViewportPercentage;
 
     impl HasViewportPercentage for SpecifiedValue {
@@ -290,9 +288,8 @@
 </%helpers:longhand>
 
 <%helpers:longhand name="word-spacing" animatable="False">
-    use cssparser::ToCss;
     use std::fmt;
-    use values::LocalToCss;
+    use style_traits::ToCss;
     use values::HasViewportPercentage;
 
     impl HasViewportPercentage for SpecifiedValue {
@@ -405,10 +402,10 @@ ${helpers.single_keyword("text-align-last",
                    derived_from="display text-decoration"
                    need_clone="True" products="servo"
                    animatable="False">
-    use cssparser::{RGBA, ToCss};
+    use cssparser::RGBA;
     use std::fmt;
-
-    use values:: NoViewportPercentage;
+    use style_traits::ToCss;
+    use values::NoViewportPercentage;
     use values::computed::ComputedValueAsSpecified;
 
     impl ComputedValueAsSpecified for SpecifiedValue {}
@@ -529,9 +526,9 @@ ${helpers.single_keyword("text-align-last",
 </%helpers:single_keyword_computed>
 
 <%helpers:longhand name="text-shadow" animatable="True">
-    use cssparser::{self, ToCss};
+    use cssparser;
     use std::fmt;
-    use values::LocalToCss;
+    use style_traits::ToCss;
     use values::HasViewportPercentage;
 
     impl HasViewportPercentage for SpecifiedValue {
@@ -739,10 +736,9 @@ ${helpers.single_keyword("text-align-last",
 
 <%helpers:longhand name="text-emphasis-style" products="gecko" need_clone="True" animatable="False">
     use computed_values::writing_mode::T as writing_mode;
-    use cssparser::ToCss;
     use std::fmt;
+    use style_traits::ToCss;
     use unicode_segmentation::UnicodeSegmentation;
-    use values::LocalToCss;
     use values::NoViewportPercentage;
 
     impl NoViewportPercentage for SpecifiedValue {}
@@ -937,6 +933,55 @@ ${helpers.single_keyword("text-align-last",
             _ => return Err(()),
         };
         Ok(SpecifiedValue::Keyword(keyword_value))
+    }
+</%helpers:longhand>
+
+<%helpers:longhand name="text-emphasis-position" animatable="False" products="none">
+    use std::fmt;
+    use values::computed::ComputedValueAsSpecified;
+    use values::NoViewportPercentage;
+    use style_traits::ToCss;
+
+    define_css_keyword_enum!(HorizontalWritingModeValue:
+                             "over" => Over,
+                             "under" => Under);
+    define_css_keyword_enum!(VerticalWritingModeValue:
+                             "right" => Right,
+                             "left" => Left);
+
+    #[derive(Debug, Clone, PartialEq)]
+    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+    pub struct SpecifiedValue(pub HorizontalWritingModeValue, pub VerticalWritingModeValue);
+
+    pub mod computed_value {
+        pub type T = super::SpecifiedValue;
+    }
+
+    impl ComputedValueAsSpecified for SpecifiedValue {}
+    impl NoViewportPercentage for SpecifiedValue {}
+
+    pub fn get_initial_value() -> computed_value::T {
+        SpecifiedValue(HorizontalWritingModeValue::Over, VerticalWritingModeValue::Right)
+    }
+
+    pub fn parse(_context: &ParserContext, input: &mut Parser) -> Result<SpecifiedValue, ()> {
+       if let Ok(horizontal) = input.try(|input| HorizontalWritingModeValue::parse(input)) {
+            let vertical = try!(VerticalWritingModeValue::parse(input));
+            Ok(SpecifiedValue(horizontal, vertical))
+        } else {
+            let vertical = try!(VerticalWritingModeValue::parse(input));
+            let horizontal = try!(HorizontalWritingModeValue::parse(input));
+            Ok(SpecifiedValue(horizontal, vertical))
+        }
+    }
+
+    impl ToCss for SpecifiedValue {
+        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+            let SpecifiedValue(horizontal, vertical) = *self;
+            try!(horizontal.to_css(dest));
+            try!(dest.write_char(' '));
+            vertical.to_css(dest)
+        }
     }
 </%helpers:longhand>
 

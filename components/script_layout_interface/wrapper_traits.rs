@@ -12,18 +12,17 @@ use gfx_traits::ByteIndex;
 use html5ever_atoms::{Namespace, LocalName};
 use msg::constellation_msg::PipelineId;
 use range::Range;
-use restyle_damage::RestyleDamage;
+use servo_url::ServoUrl;
 use std::fmt::Debug;
 use std::sync::Arc;
 use style::atomic_refcell::AtomicRefCell;
 use style::computed_values::display;
 use style::context::SharedStyleContext;
 use style::data::ElementData;
-use style::dom::{LayoutIterator, NodeInfo, PresentationalHintsSynthetizer, TElement, TNode};
+use style::dom::{LayoutIterator, NodeInfo, PresentationalHintsSynthetizer, TNode};
 use style::dom::OpaqueNode;
 use style::properties::ServoComputedValues;
-use style::selector_impl::{PseudoElement, PseudoElementCascadeType, ServoSelectorImpl};
-use url::Url;
+use style::selector_parser::{PseudoElement, PseudoElementCascadeType, RestyleDamage, SelectorImpl};
 
 #[derive(Copy, PartialEq, Clone, Debug)]
 pub enum PseudoElementType<T> {
@@ -87,8 +86,6 @@ pub trait LayoutNode: GetLayoutData + TNode {
     unsafe fn init_style_and_layout_data(&self, data: OpaqueStyleAndLayoutData);
     unsafe fn take_style_and_layout_data(&self) -> OpaqueStyleAndLayoutData;
 
-    fn has_changed(&self) -> bool;
-
     unsafe fn clear_dirty_bits(&self);
 
     fn rev_children(self) -> LayoutIterator<ReverseChildrenIterator<Self>> {
@@ -150,7 +147,7 @@ impl<ConcreteNode> Iterator for TreeIterator<ConcreteNode>
 pub trait ThreadSafeLayoutNode: Clone + Copy + GetLayoutData + NodeInfo + PartialEq + Sized {
     type ConcreteThreadSafeLayoutElement:
         ThreadSafeLayoutElement<ConcreteThreadSafeLayoutNode = Self>
-        + ::selectors::Element<Impl=ServoSelectorImpl>;
+        + ::selectors::Element<Impl=SelectorImpl>;
     type ChildrenIterator: Iterator<Item = Self> + Sized;
 
     /// Converts self into an `OpaqueNode`.
@@ -252,9 +249,7 @@ pub trait ThreadSafeLayoutNode: Clone + Copy + GetLayoutData + NodeInfo + Partia
     fn selection(&self) -> Option<Range<ByteIndex>>;
 
     /// If this is an image element, returns its URL. If this is not an image element, fails.
-    ///
-    /// FIXME(pcwalton): Don't copy URLs.
-    fn image_url(&self) -> Option<Url>;
+    fn image_url(&self) -> Option<ServoUrl>;
 
     fn canvas_data(&self) -> Option<HTMLCanvasData>;
 
@@ -275,11 +270,8 @@ pub trait DangerousThreadSafeLayoutNode: ThreadSafeLayoutNode {
     unsafe fn dangerous_next_sibling(&self) -> Option<Self>;
 }
 
-pub trait LayoutElement: Clone + Copy + Sized + Debug + GetLayoutData + TElement {
-}
-
 pub trait ThreadSafeLayoutElement: Clone + Copy + Sized + Debug +
-                                   ::selectors::Element<Impl=ServoSelectorImpl> +
+                                   ::selectors::Element<Impl=SelectorImpl> +
                                    GetLayoutData +
                                    PresentationalHintsSynthetizer {
     type ConcreteThreadSafeLayoutNode: ThreadSafeLayoutNode<ConcreteThreadSafeLayoutElement = Self>;
@@ -375,13 +367,13 @@ pub trait ThreadSafeLayoutElement: Clone + Copy + Sized + Debug +
                                 .borrow()
                                 .current_styles().pseudos.contains_key(&style_pseudo) {
                             let mut data = self.get_style_data().unwrap().borrow_mut();
-                            let new_style =
+                            let new_style_and_rule_node =
                                 context.stylist.precomputed_values_for_pseudo(
                                     &style_pseudo,
                                     Some(&data.current_styles().primary),
                                     false);
                             data.current_pseudos_mut()
-                                .insert(style_pseudo.clone(), new_style.unwrap());
+                                .insert(style_pseudo.clone(), new_style_and_rule_node.unwrap());
                         }
                     }
                     PseudoElementCascadeType::Lazy => {
@@ -404,7 +396,7 @@ pub trait ThreadSafeLayoutElement: Clone + Copy + Sized + Debug +
 
                 self.get_style_data().unwrap().borrow()
                     .current_styles().pseudos.get(&style_pseudo)
-                    .unwrap().clone()
+                    .unwrap().0.clone()
             }
         }
     }
@@ -413,7 +405,7 @@ pub trait ThreadSafeLayoutElement: Clone + Copy + Sized + Debug +
     fn selected_style(&self) -> Arc<ServoComputedValues> {
         let data = self.get_style_data().unwrap().borrow();
         data.current_styles().pseudos
-            .get(&PseudoElement::Selection)
+            .get(&PseudoElement::Selection).map(|s| &s.0)
             .unwrap_or(&data.current_styles().primary)
             .clone()
     }
@@ -432,8 +424,8 @@ pub trait ThreadSafeLayoutElement: Clone + Copy + Sized + Debug +
             PseudoElementType::Normal
                 => data.current_styles().primary.clone(),
             other
-                => data.current_styles().pseudos.get(&other.style_pseudo_element()).unwrap().clone(),
+                => data.current_styles().pseudos
+                       .get(&other.style_pseudo_element()).unwrap().0.clone(),
         }
     }
-
 }

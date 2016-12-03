@@ -104,6 +104,7 @@ COMPILATION_TARGETS = {
             "nsBorderColors",
             "nsChangeHint",
             "nscolor",
+            "nsCSSKeyword",
             "nsCSSPropertyID",
             "nsCSSRect",
             "nsCSSRect_heap",
@@ -187,6 +188,7 @@ COMPILATION_TARGETS = {
             "StyleTransition",
             "UniquePtr",
         ],
+        "bitfield_enum_types": ["nsChangeHint", "nsRestyleHint"],
         "opaque_types": [
             "atomic___base",
             "nsAString_internal_char_traits",
@@ -236,10 +238,12 @@ COMPILATION_TARGETS = {
         "target_dir": "../gecko_bindings",
         "blacklist_types": [
             "nsACString_internal",
+            "nsAString_internal",
         ],
         "raw_lines": [
-            "pub use nsstring::nsACString;",
+            "pub use nsstring::{nsACString, nsAString};",
             "type nsACString_internal = nsACString;",
+            "type nsAString_internal = nsAString;"
         ],
         "flags": [
             "--ignore-methods",
@@ -269,8 +273,13 @@ COMPILATION_TARGETS = {
             "StyleBasicShape",
             "StyleBasicShapeType",
             "StyleClipPath",
+            "nscoord",
+            "nsCSSKeyword",
             "nsCSSShadowArray",
+            "nsCSSValue",
+            "nsCSSValueSharedList",
             "nsChangeHint",
+            "nsCursorImage",
             "nsFont",
             "nsIAtom",
             "nsIDocument",
@@ -332,6 +341,9 @@ COMPILATION_TARGETS = {
             "RawGeckoElement",
             "RawGeckoDocument",
             "RawServoDeclarationBlockStrong",
+        ],
+        "servo_borrow_types": [
+            "nsCSSValue",
         ],
         "whitelist_functions": [
             "Servo_.*",
@@ -513,6 +525,11 @@ def build(objdir, target_name, debug, debugger, kind_name=None,
             flags.append("--whitelist-var")
             flags.append(header)
 
+    if "bitfield_enum_types" in current_target:
+        for ty in current_target["bitfield_enum_types"]:
+            flags.append("--bitfield-enum")
+            flags.append(ty)
+
     if "opaque_types" in current_target:
         for ty in current_target["opaque_types"]:
             flags.append("--opaque-type")
@@ -542,7 +559,7 @@ Option<&'a {0}>;".format(ty))
             zero_size_type(ty, flags)
 
     if "servo_immutable_borrow_types" in current_target:
-        for ty in current_target["servo_immutable_borrow_types"]:
+        for ty in current_target.get("servo_immutable_borrow_types", []) + current_target.get("servo_borrow_types", []):
             flags.append("--blacklist-type")
             flags.append("{}Borrowed".format(ty))
             flags.append("--raw-line")
@@ -550,8 +567,18 @@ Option<&'a {0}>;".format(ty))
             flags.append("--blacklist-type")
             flags.append("{}BorrowedOrNull".format(ty))
             flags.append("--raw-line")
-            flags.append("pub type {0}BorrowedOrNull<'a> = \
-Option<&'a {0}>;".format(ty))
+            flags.append("pub type {0}BorrowedOrNull<'a> = Option<&'a {0}>;".format(ty))
+    if "servo_borrow_types" in current_target:
+        for ty in current_target["servo_borrow_types"]:
+            flags.append("--blacklist-type")
+            flags.append("{}BorrowedMut".format(ty))
+            flags.append("--raw-line")
+            flags.append("pub type {0}BorrowedMut<'a> = &'a mut {0};".format(ty))
+            flags.append("--blacklist-type")
+            flags.append("{}BorrowedMutOrNull".format(ty))
+            flags.append("--raw-line")
+            flags.append("pub type {0}BorrowedMutOrNull<'a> = \
+Option<&'a mut {0}>;".format(ty))
             # Right now the only immutable borrow types are ones which we import
             # from the |structs| module. As such, we don't need to create an opaque
             # type with zero_size_type. If we ever introduce immutable borrow types

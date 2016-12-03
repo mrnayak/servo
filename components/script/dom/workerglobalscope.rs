@@ -34,6 +34,7 @@ use script_runtime::{ScriptThreadEventCategory, PromiseJobQueue, EnqueuedPromise
 use script_thread::{Runnable, RunnableWrapper};
 use script_traits::{TimerEvent, TimerEventId};
 use script_traits::WorkerGlobalScopeInit;
+use servo_url::ServoUrl;
 use std::default::Default;
 use std::panic;
 use std::rc::Rc;
@@ -41,8 +42,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use task_source::file_reading::FileReadingTaskSource;
+use task_source::networking::NetworkingTaskSource;
 use timers::{IsInterval, TimerCallback};
-use url::Url;
 
 pub fn prepare_workerscope_init(global: &GlobalScope,
                                 devtools_sender: Option<IpcSender<DevtoolScriptControlMsg>>) -> WorkerGlobalScopeInit {
@@ -67,7 +68,7 @@ pub struct WorkerGlobalScope {
     globalscope: GlobalScope,
 
     worker_id: WorkerId,
-    worker_url: Url,
+    worker_url: ServoUrl,
     #[ignore_heap_size_of = "Arc"]
     closing: Option<Arc<AtomicBool>>,
     #[ignore_heap_size_of = "Defined in js"]
@@ -90,7 +91,7 @@ pub struct WorkerGlobalScope {
 
 impl WorkerGlobalScope {
     pub fn new_inherited(init: WorkerGlobalScopeInit,
-                         worker_url: Url,
+                         worker_url: ServoUrl,
                          runtime: Runtime,
                          from_devtools_receiver: Receiver<DevtoolScriptControlMsg>,
                          timer_event_chan: IpcSender<TimerEvent>,
@@ -143,7 +144,7 @@ impl WorkerGlobalScope {
         }
     }
 
-    pub fn get_url(&self) -> &Url {
+    pub fn get_url(&self) -> &ServoUrl {
         &self.worker_url
     }
 
@@ -267,8 +268,10 @@ impl WorkerGlobalScopeMethods for WorkerGlobalScope {
         base64_atob(atob)
     }
 
+    #[allow(unsafe_code)]
     // https://html.spec.whatwg.org/multipage/#dom-windowtimers-settimeout
-    fn SetTimeout(&self, _cx: *mut JSContext, callback: Rc<Function>, timeout: i32, args: Vec<HandleValue>) -> i32 {
+    unsafe fn SetTimeout(&self, _cx: *mut JSContext, callback: Rc<Function>,
+                         timeout: i32, args: Vec<HandleValue>) -> i32 {
         self.upcast::<GlobalScope>().set_timeout_or_interval(
             TimerCallback::FunctionTimerCallback(callback),
             args,
@@ -276,8 +279,10 @@ impl WorkerGlobalScopeMethods for WorkerGlobalScope {
             IsInterval::NonInterval)
     }
 
+    #[allow(unsafe_code)]
     // https://html.spec.whatwg.org/multipage/#dom-windowtimers-settimeout
-    fn SetTimeout_(&self, _cx: *mut JSContext, callback: DOMString, timeout: i32, args: Vec<HandleValue>) -> i32 {
+    unsafe fn SetTimeout_(&self, _cx: *mut JSContext, callback: DOMString,
+                          timeout: i32, args: Vec<HandleValue>) -> i32 {
         self.upcast::<GlobalScope>().set_timeout_or_interval(
             TimerCallback::StringTimerCallback(callback),
             args,
@@ -290,8 +295,10 @@ impl WorkerGlobalScopeMethods for WorkerGlobalScope {
         self.upcast::<GlobalScope>().clear_timeout_or_interval(handle);
     }
 
+    #[allow(unsafe_code)]
     // https://html.spec.whatwg.org/multipage/#dom-windowtimers-setinterval
-    fn SetInterval(&self, _cx: *mut JSContext, callback: Rc<Function>, timeout: i32, args: Vec<HandleValue>) -> i32 {
+    unsafe fn SetInterval(&self, _cx: *mut JSContext, callback: Rc<Function>,
+                          timeout: i32, args: Vec<HandleValue>) -> i32 {
         self.upcast::<GlobalScope>().set_timeout_or_interval(
             TimerCallback::FunctionTimerCallback(callback),
             args,
@@ -299,8 +306,10 @@ impl WorkerGlobalScopeMethods for WorkerGlobalScope {
             IsInterval::Interval)
     }
 
+    #[allow(unsafe_code)]
     // https://html.spec.whatwg.org/multipage/#dom-windowtimers-setinterval
-    fn SetInterval_(&self, _cx: *mut JSContext, callback: DOMString, timeout: i32, args: Vec<HandleValue>) -> i32 {
+    unsafe fn SetInterval_(&self, _cx: *mut JSContext, callback: DOMString,
+                           timeout: i32, args: Vec<HandleValue>) -> i32 {
         self.upcast::<GlobalScope>().set_timeout_or_interval(
             TimerCallback::StringTimerCallback(callback),
             args,
@@ -359,6 +368,10 @@ impl WorkerGlobalScope {
 
     pub fn file_reading_task_source(&self) -> FileReadingTaskSource {
         FileReadingTaskSource(self.script_chan())
+    }
+
+    pub fn networking_task_source(&self) -> NetworkingTaskSource {
+        NetworkingTaskSource(self.script_chan())
     }
 
     pub fn new_script_pair(&self) -> (Box<ScriptChan + Send>, Box<ScriptPort + Send>) {

@@ -2,10 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+use dom::bindings::codegen::Bindings::RequestBinding::RequestInfo;
 use dom::bindings::codegen::Bindings::RequestBinding::RequestInit;
 use dom::bindings::codegen::Bindings::ResponseBinding::ResponseBinding::ResponseMethods;
 use dom::bindings::codegen::Bindings::ResponseBinding::ResponseType as DOMResponseType;
-use dom::bindings::codegen::UnionTypes::RequestOrUSVString;
 use dom::bindings::error::Error;
 use dom::bindings::js::Root;
 use dom::bindings::refcounted::{Trusted, TrustedPromise};
@@ -24,10 +24,10 @@ use net_traits::CoreResourceMsg::Fetch as NetTraitsFetch;
 use net_traits::request::Request as NetTraitsRequest;
 use net_traits::request::RequestInit as NetTraitsRequestInit;
 use network_listener::{NetworkListener, PreInvoke};
+use servo_url::ServoUrl;
 use std::mem;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use url::Url;
 
 struct FetchContext {
     fetch_promise: Option<TrustedPromise>,
@@ -35,7 +35,7 @@ struct FetchContext {
     body: Vec<u8>,
 }
 
-fn from_referrer_to_referrer_url(request: &NetTraitsRequest) -> Option<Url> {
+fn from_referrer_to_referrer_url(request: &NetTraitsRequest) -> Option<ServoUrl> {
     let referrer = request.referrer.borrow();
     referrer.to_url().map(|url| url.clone())
 }
@@ -61,12 +61,14 @@ fn request_init_from_request(request: NetTraitsRequest) -> NetTraitsRequestInit 
         referrer_url: from_referrer_to_referrer_url(&request),
         referrer_policy: request.referrer_policy.get(),
         pipeline_id: request.pipeline_id.get(),
+        redirect_mode: request.redirect_mode.get(),
+        ..NetTraitsRequestInit::default()
     }
 }
 
 // https://fetch.spec.whatwg.org/#fetch-method
 #[allow(unrooted_must_root)]
-pub fn Fetch(global: &GlobalScope, input: RequestOrUSVString, init: &RequestInit) -> Rc<Promise> {
+pub fn Fetch(global: &GlobalScope, input: RequestInfo, init: &RequestInit) -> Rc<Promise> {
     let core_resource_thread = global.core_resource_thread();
 
     // Step 1
@@ -95,8 +97,8 @@ pub fn Fetch(global: &GlobalScope, input: RequestOrUSVString, init: &RequestInit
     }));
     let listener = NetworkListener {
         context: fetch_context,
-        script_chan: global.networking_task_source(),
-        wrapper: None,
+        task_source: global.networking_task_source(),
+        wrapper: Some(global.get_runnable_wrapper())
     };
 
     ROUTER.add_route(action_receiver.to_opaque(), box move |message| {
