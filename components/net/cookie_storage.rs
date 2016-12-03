@@ -97,11 +97,11 @@ impl CookieStorage {
                 //Remove non-secure cookie with lowest expiry time
                 let mut is_first = true;
                 let mut index = 0;
-                let mut exp_time = cookies.get(0).unwrap().expiry_time.unwrap();
+                let mut exp_time = time::now();
                 for i in 0..cookies.len() {
                     let c = cookies.get(i).unwrap();
-                    if !c.cookie.secure && (is_first || c.expiry_time.unwrap() < exp_time) {
-                        exp_time = c.expiry_time.unwrap();
+                    if !c.cookie.secure && (is_first || c.last_access < exp_time) {
+                        exp_time = c.last_access;
                         index = i;
 
                         is_first = false;
@@ -115,12 +115,12 @@ impl CookieStorage {
                         } else {
                             let mut is_first = true;
                             let mut index = 0;
-                            let mut exp_time = cookies.get(0).unwrap().expiry_time.unwrap();
+                            let mut exp_time = time::now();
                             //Get secure cookie with the least expiry time
                             for i in 0..cookies.len() {
                                 let c = cookies.get(i).unwrap();
-                                if c.cookie.secure && (is_first || c.expiry_time.unwrap() < exp_time) {
-                                    exp_time = c.expiry_time.unwrap();
+                                if c.cookie.secure && (is_first || c.last_access < exp_time) {
+                                    exp_time = c.last_access;
                                     index = i;
                                     is_first = false;
                                 }
@@ -217,11 +217,16 @@ impl CookieStorage {
 	}                                
     
     fn check_cookie_expired(cookie: &Cookie) -> bool {
-        let cookie_expiry_time = cookie.expiry_time.unwrap().to_timespec();
-        let cur_time = time::get_time();
+        if let Some(cookie_expiry_time_) = cookie.expiry_time { 
+            let cookie_expiry_time = cookie_expiry_time_.to_timespec();
+            let cur_time = time::get_time();
 
-        if cookie_expiry_time <= cur_time {
-            return true;
+            if cookie_expiry_time <= cur_time {
+                return true;
+            } else {
+                return false;
+            }
+
         } else {
             return false;
         }

@@ -7,6 +7,7 @@ use net::cookie::Cookie;
 use net::cookie_storage::CookieStorage;
 use net_traits::CookieSource;
 use servo_url::ServoUrl;
+use hyper::header::{Header, SetCookie};
 
 #[test]
 fn test_domain_match() {
@@ -132,3 +133,49 @@ fn test_sort_order() {
     assert!(CookieStorage::cookie_comparator(&a_prime, &a) == Ordering::Greater);
     assert!(CookieStorage::cookie_comparator(&a, &a) == Ordering::Equal);
 }
+
+
+fn run(set_location: &str, set_cookies: &Vec<String>, final_location: &str) -> String {
+    let mut storage = CookieStorage::new();
+    let url = ServoUrl::parse(set_location).unwrap();
+    let source = CookieSource::HTTP;
+
+    // Add all cookies to the store
+    for str_cookie in set_cookies {
+        let bytes = str_cookie.to_string().into_bytes();
+        let header = Header::parse_header(&[bytes]);
+        if let Ok(SetCookie(cookies)) = header {
+            for bare_cookie in cookies {
+                if let Some(cookie) = Cookie::new_wrapped(bare_cookie, &url, source) {
+                    storage.push(cookie, source);
+                }
+            }
+        }
+    }
+
+    // Get cookies for the test location
+    let url = ServoUrl::parse(final_location).unwrap();
+    storage.cookies_for_url(&url, source).unwrap_or("".to_string())
+}
+
+
+#[test]
+fn test_cookie_eviction() {
+    let mut vec = Vec::new();
+    for i in 1..47{
+        let mut st: String  = "extra".to_owned();
+        st.push_str(&i.to_string());
+        st.push_str(&"=bar; Secure; expires=Sun, 18-Apr-2000 21:06:29 GMT");
+        vec.push(st);
+    }
+    vec.push("foo=bar; Secure; expires=Sun, 18-Apr-2027 21:06:29 GMT".to_owned());
+    vec.push("foo2=bar; Secure; expires=Sun, 18-Apr-2000 21:06:29 GMT".to_owned());
+    vec.push("foo3=bar; Secure; expires=Sun, 18-Apr-2028 21:06:29 GMT".to_owned());
+    vec.push("foo4=bar; Secure; expires=Sun, 18-Apr-2029 21:06:29 GMT".to_owned());
+    vec.push("foo5=bar; Secure; expires=Sun, 18-Apr-2077 21:06:29 GMT".to_owned());
+    
+    let r = run("https://home.example.org:8888/cookie-parser?0001",&vec,
+                "https://home.example.org:8888/cookie-parser-result?0001");
+    assert_eq!(&r, "foo=bar; foo3=bar; foo4=bar; foo5=bar");
+}
+
