@@ -19,6 +19,7 @@ extern crate time;
 pub struct CookieStorage {
     version: u32,
     cookies_map: HashMap<String, Vec<Cookie>>,
+    max_per_host: u32,
 }
 
 impl CookieStorage {
@@ -26,6 +27,7 @@ impl CookieStorage {
         CookieStorage {
             version: 1,
             cookies_map: HashMap::new(),
+            max_per_host: 50,
         }
     }
 
@@ -92,22 +94,43 @@ impl CookieStorage {
 
             //https://datatracker.ietf.org/doc/draft-ietf-httpbis-cookie-alone 
             if new_len == old_len {
-                //Remove non-secure cookie with least expiry time
+                //Remove non-secure cookie with lowest expiry time
+                let mut is_first = true;
                 let mut index = 0;
                 let mut exp_time = cookies.get(0).unwrap().expiry_time.unwrap();
                 for i in 0..cookies.len() {
                     let c = cookies.get(i).unwrap();
-                    if !c.cookie.secure && c.expiry_time.unwrap() < exp_time {
+                    if !c.cookie.secure && (is_first || c.expiry_time.unwrap() < exp_time) {
                         exp_time = c.expiry_time.unwrap();
                         index = i;
-                        break;
+
+                        is_first = false;
                     }
                 }
-                cookies.remove(index);
+
+                //All secure cookies were found
+                if is_first {
+                        if !cookie.cookie.secure {
+                            return;
+                        } else {
+                            let mut is_first = true;
+                            let mut index = 0;
+                            let mut exp_time = cookies.get(0).unwrap().expiry_time.unwrap();
+                            //Get secure cookie with the least expiry time
+                            for i in 0..cookies.len() {
+                                let c = cookies.get(i).unwrap();
+                                if c.cookie.secure && (is_first || c.expiry_time.unwrap() < exp_time) {
+                                    exp_time = c.expiry_time.unwrap();
+                                    index = i;
+                                    is_first = false;
+                                }
+                            }
+                            cookies.remove(index);
+                        }
+                } else {
+                    cookies.remove(index);
+                }
             }
-
-        } else {
-
         }
         cookies.push(cookie);
     }
