@@ -18,11 +18,15 @@ use hyper::header::{Encoding, Location, Pragma, Quality, QualityItem, SetCookie,
 use hyper::header::{Headers, Host, HttpDate, Referer as HyperReferer};
 use hyper::method::Method;
 use hyper::mime::{Mime, SubLevel, TopLevel};
-use hyper::server::{Request as HyperRequest, Response as HyperResponse};
+use hyper::net::Openssl;
+use hyper::server::{Request as HyperRequest, Response as HyperResponse, Server};
 use hyper::status::StatusCode;
 use hyper::uri::RequestUri;
 use msg::constellation_msg::TEST_PIPELINE_ID;
 use net::fetch::cors_cache::CorsCache;
+use net::hsts::HstsEntry;
+use net_traits::IncludeSubdomains;
+use net_traits::NetworkError;
 use net_traits::ReferrerPolicy;
 use net_traits::request::{Origin, RedirectMode, Referrer, Request, RequestMode};
 use net_traits::response::{CacheState, Response, ResponseBody, ResponseType};
@@ -57,6 +61,18 @@ fn test_fetch_response_is_not_network_error() {
     if fetch_response.is_network_error() {
         panic!("fetch response shouldn't be a network error");
     }
+}
+
+#[test]
+fn test_fetch_on_bad_port_is_network_error() {
+    let url = ServoUrl::parse("http://www.example.org:6667").unwrap();
+    let origin = Origin::Origin(url.origin());
+    let request = Request::new(url, Some(origin), false, None);
+    *request.referrer.borrow_mut() = Referrer::NoReferrer;
+    let fetch_response = fetch(request, None);
+    assert!(fetch_response.is_network_error());
+    let fetch_error = fetch_response.get_network_error().unwrap();
+    assert!(fetch_error == &NetworkError::Internal("Request attempted on bad port".into()))
 }
 
 #[test]
@@ -491,6 +507,51 @@ fn test_fetch_with_local_urls_only() {
 
     assert!(!local_response.is_network_error());
     assert!(server_response.is_network_error());
+}
+
+#[test]
+fn test_fetch_with_hsts() {
+    static MESSAGE: &'static [u8] = b"";
+    let handler = move |_: HyperRequest, response: HyperResponse| {
+        response.send(MESSAGE).unwrap();
+    };
+
+    let path = resources_dir_path().expect("Cannot find resource dir");
+    let mut cert_path = path.clone();
+    cert_path.push("certificate.crt");
+
+    let mut key_path = path.clone();
+    key_path.push("privatekey.key");
+
+    let ssl = Openssl::with_cert_and_key(cert_path.into_os_string(), key_path.into_os_string())
+        .unwrap();
+
+    let mut server = Server::https("0.0.0.0:443", ssl).unwrap().handle_threads(handler, 1).unwrap();
+
+    let mut context = new_fetch_context(None);
+    context.certificate_file = "certificate.crt".to_string();
+
+    {
+        let mut list = context.state.hsts_list.write().unwrap();
+        list.push(HstsEntry::new("localhost".to_owned(), IncludeSubdomains::NotIncluded, None)
+            .unwrap());
+    }
+    let do_fetch = |url: ServoUrl| {
+        let origin = Origin::Origin(url.origin());
+        let mut request = Request::new(url, Some(origin), false, None);
+        *request.referrer.borrow_mut() = Referrer::NoReferrer;
+
+        // Set the flag.
+        request.local_urls_only = false;
+
+        fetch_with_context(request, &context)
+    };
+
+    let url = ServoUrl::parse("http://localhost").unwrap();
+    let response = do_fetch(url);
+    let _ = server.close();
+    assert_eq!(response.internal_response.unwrap().url().unwrap().scheme(),
+               "https");
 }
 
 fn setup_server_and_fetch(message: &'static [u8], redirect_cap: u32) -> Response {

@@ -281,7 +281,7 @@ fn set_cookie_for_url(cookie_jar: &Arc<RwLock<CookieStorage>>,
     if let Ok(SetCookie(cookies)) = header {
         for bare_cookie in cookies {
             if let Some(cookie) = cookie::Cookie::new_wrapped(bare_cookie, request, source) {
-                cookie_jar.push(cookie, source);
+                cookie_jar.push(cookie, request, source);
             }
         }
     }
@@ -1021,7 +1021,8 @@ fn http_network_fetch(request: Rc<Request>,
 
     // Step 2
     // TODO be able to create connection using current url's origin and credentials
-    let connection = create_http_connector();
+
+    let connection = create_http_connector(&context.certificate_file);
 
     // Step 3
     // TODO be able to tell if the connection is a failure

@@ -37,6 +37,7 @@ pub struct FetchContext {
     pub user_agent: Cow<'static, str>,
     pub devtools_chan: Option<Sender<DevtoolsControlMsg>>,
     pub filemanager: FileManager,
+    pub certificate_file: String,
 }
 
 pub type DoneChannel = Option<(Sender<Data>, Receiver<Data>)>;
@@ -143,6 +144,18 @@ pub fn main_fetch(request: Rc<Request>,
 
     // Step 5
     // TODO this step (CSP port/content blocking)
+    if let Some(port) = request.url().port() {
+        let is_ftp = request.url().scheme() == "ftp" && (port == 20 || port == 21);
+        static BAD_PORTS: [u16; 64] = [1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42,
+                                       43, 53, 77, 79, 87, 95, 101, 102, 103, 104, 109, 110, 111,
+                                       113, 115, 117, 119, 123, 135, 139, 143, 179, 389, 465, 512,
+                                       513, 514, 515, 526, 530, 531, 532, 540, 556, 563, 587, 601,
+                                       636, 993, 995, 2049, 3659, 4045, 6000, 6665, 6666, 6667,
+                                       6668, 6669];
+        if !is_ftp && BAD_PORTS.binary_search(&port).is_ok() {
+            response = Some(Response::network_error(NetworkError::Internal("Request attempted on bad port".into())));
+        }
+    }
 
     // Step 6
     // TODO this step (referrer policy)
@@ -177,7 +190,15 @@ pub fn main_fetch(request: Rc<Request>,
     }
 
     // Step 9
-    // TODO this step (HSTS)
+    if request.current_url().scheme() == "http" && request.current_url().domain() != None {
+        if context.state
+            .hsts_list
+            .read()
+            .unwrap()
+            .is_host_secure(request.current_url().domain().unwrap()) {
+           request.url_list.borrow_mut().last_mut().unwrap().as_mut_url().unwrap().set_scheme("https").unwrap();
+        }
+    }
 
     // Step 10
     // this step is obsoleted by fetch_async
