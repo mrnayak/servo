@@ -50,7 +50,7 @@ pub trait StylesheetOwner {
 
 pub enum StylesheetContextSource {
     // NB: `media` is just an option so we avoid cloning it.
-    LinkElement { media: Option<MediaList>, url: ServoUrl },
+    LinkElement { media: Option<MediaList>, url: ServoUrl, integrity_metadata: String },
     Import(Arc<RwLock<ImportRule>>),
 }
 
@@ -67,6 +67,13 @@ impl StylesheetContextSource {
                     .clone()
             }
         }
+    }
+    
+    fn integrity_metadata(&self) -> String {
+    	match *self {
+    		StylesheetContextSource::LinkElement { ref integrity_metadata, .. } => integrity_metadata.to_owned(),
+    		_ => "".to_owned()
+    	}
     }
 }
 
@@ -192,6 +199,7 @@ impl<'a> StylesheetLoader<'a> {
 impl<'a> StylesheetLoader<'a> {
     pub fn load(&self, source: StylesheetContextSource) {
         let url = source.url();
+        let integrity_metadata = source.integrity_metadata();
         let context = Arc::new(Mutex::new(StylesheetContext {
             elem: Trusted::new(&*self.elem),
             source: source,
@@ -231,6 +239,7 @@ impl<'a> StylesheetLoader<'a> {
             pipeline_id: Some(self.elem.global().pipeline_id()),
             referrer_url: Some(document.url()),
             referrer_policy: referrer_policy,
+            integrity_metadata : integrity_metadata,
             .. RequestInit::default()
         };
 

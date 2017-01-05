@@ -62,7 +62,7 @@ pub mod mime_classifier;
 pub mod resource_thread;
 mod storage_thread;
 mod websocket_loader;
-
+mod subresource_integrity;
 /// An implementation of the [Fetch specification](https://fetch.spec.whatwg.org/)
 pub mod fetch {
     pub mod cors_cache;
